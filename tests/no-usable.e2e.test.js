@@ -69,7 +69,7 @@ function hermeticConfig(tavilyApiUrl, outputDir) {
     mcpTavilyToken: "",
     defaultExtra: 6,
     providerWeights: {},
-    retryMaxAttempts: 3, // needed or requestJson's `for` loop yields attempt<undefined → never runs → throw undefined
+    retryMaxAttempts: 3, // explicit; requestJson also falls back to DEFAULT_RETRY_MAX_ATTEMPTS if absent
     outputDir,
     outputRetentionDays: 30,
   };

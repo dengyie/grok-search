@@ -204,17 +204,25 @@ export function retryAfterMs(headers) {
 }
 
 export function backoffMs(config, attemptIndex) {
-  const maxWaitMs = config.retryMaxWait * 1000;
-  const computed = config.retryMultiplier * 1000 * 2 ** attemptIndex;
-  return Math.min(maxWaitMs, computed);
+  const maxWaitMs = (Number.isFinite(config.retryMaxWait) ? config.retryMaxWait : 10) * 1000;
+  const multiplier = Number.isFinite(config.retryMultiplier) ? config.retryMultiplier : 1;
+  const computed = multiplier * 1000 * 2 ** attemptIndex;
+  return Math.min(maxWaitMs, Math.max(0, computed));
 }
 
 export function debugLog(config, message) {
   if (config?.debug) console.error(`[grok-search] ${message}`);
 }
 
+export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
+
+export function retryMaxAttempts(config) {
+  const n = config?.retryMaxAttempts;
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_RETRY_MAX_ATTEMPTS;
+}
+
 export async function requestJson(url, { headers, body, timeoutMs, config, retry = false }) {
-  const maxAttempts = retry ? config.retryMaxAttempts : 1;
+  const maxAttempts = retry ? retryMaxAttempts(config) : 1;
   let lastError;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -325,7 +333,7 @@ export async function firecrawlScrape(url, config) {
   const authMode = firecrawlAuthMode(config);
   let lastError = "Firecrawl Scrape 返回空内容";
 
-  for (let attempt = 0; attempt < config.retryMaxAttempts; attempt += 1) {
+  for (let attempt = 0; attempt < retryMaxAttempts(config); attempt += 1) {
     try {
       const data = await requestJson(endpoint, {
         headers: firecrawlHeaders(config),
@@ -354,14 +362,14 @@ export async function firecrawlScrape(url, config) {
       }
 
       lastError = "Firecrawl Scrape 返回空内容";
-      debugLog(config, `Firecrawl empty markdown, retry ${attempt + 1}/${config.retryMaxAttempts}`);
+      debugLog(config, `Firecrawl empty markdown, retry ${attempt + 1}/${retryMaxAttempts(config)}`);
     } catch (error) {
       lastError = error.message;
       if (error.status && !RETRYABLE_STATUS.has(error.status)) break;
-      debugLog(config, `Firecrawl error, retry ${attempt + 1}/${config.retryMaxAttempts}: ${error.message}`);
+      debugLog(config, `Firecrawl error, retry ${attempt + 1}/${retryMaxAttempts(config)}: ${error.message}`);
     }
 
-    if (attempt < config.retryMaxAttempts - 1) {
+    if (attempt < retryMaxAttempts(config) - 1) {
       await sleep(backoffMs(config, attempt));
     }
   }
