@@ -2,10 +2,11 @@
 import { ConfigError, loadConfig, normalizeOpenRouterSearchEngine } from "./lib/config.js";
 import { searchGrokResponses } from "./lib/grok-responses.js";
 import { cleanupOutputDir, previewText, printJson, writeJsonOutput } from "./lib/output.js";
-import { firecrawlAuthMode, firecrawlSearch, tavilySearch } from "./lib/providers.js";
+import { firecrawlAuthMode, firecrawlSearch, fathomSearch, hasFathomApiKey, hasMcpTavilyConfig, hasTavilyApiKey, mcpTavilySearch, tavilySearch } from "./lib/providers.js";
 import {
   buildRawSourcesPayload,
   compactSources,
+  filterByRecency,
   hasRawSourceValues,
   mergeSources,
 } from "./lib/sources.js";
@@ -15,9 +16,17 @@ const QUOTA_CODE_PATTERN = /insufficient[_-]?quota|quota[_-]?exhausted|credits?[
 const QUOTA_MESSAGE_PATTERN = /quota|credits?|balance|billing|rate[ _-]?limit|insufficient|额度|余额|计费|限流/i;
 
 function usage() {
-  return `Usage: ./scripts/search.js [--platform NAME] [--model MODEL] [--extra N|--no-extra] [--source-chars N] [--full-sources] [--max-chars N] <query>
+  return `Usage: ./scripts/search.js [--platform NAME] [--model MODEL] [--extra N|--no-extra] [--source-chars N] [--full-sources] [--max-chars N] [--days N] <query>
 
-Run a Responses-compatible Grok/OpenRouter web search and return JSON with independent Tavily/Firecrawl sources.
+Run a Responses-compatible Grok/OpenRouter web search and return JSON with independent Tavily/Firecrawl/Fathom/MCP Tavily sources.
+
+Options:
+  --days N            Restrict results to sources published within the last N days
+                      (e.g. --days 2 for daily-report queries that should only carry 1-2 day old info).
+                      Tavily additionally passes N to its native "days" API param (advanced depth);
+                      all providers (Grok excepted) are then post-filtered by a best-effort date parse
+                      of published_date / title / URL, dropping anything older than N days. Sources
+                      with no parseable date are kept (recency inferred by position).
 
 Environment:
   GROK_API_URL         Responses-compatible base URL; required
@@ -26,10 +35,16 @@ Environment:
   GROK_MODEL           Optional default model; default grok-4.3
   GROK_RESPONSES_MAX_TURNS
                        Optional Responses max_turns; default 3
-  GROK_DEFAULT_EXTRA   Optional total Tavily/Firecrawl source count; default 6
+  GROK_DEFAULT_EXTRA   Optional total Tavily/Firecrawl/Fathom/MCP Tavily source count; default 6
   GROK_SOURCE_CHARS    Optional source snippet size; default 400
+  GROK_PROVIDER_WEIGHTS
+                       Optional JSON {"tavily":N,"firecrawl":N,"fathom":N,"mcpTavily":N}
+                       controlling how GROK_DEFAULT_EXTRA is split across providers
   TAVILY_API_KEY       Optional Tavily parallel source provider
   FIRECRAWL_API_KEY    Optional Firecrawl key; keyless search works without it
+  MCP_TAVILY_URL       Optional MCP-HTTP Tavily proxy URL; default https://search.604020.xyz/mcp
+  MCP_TAVILY_TOKEN     Optional Bearer token for MCP_TAVILY_URL (MCP Tavily provider)
+  MCP_TAVILY_TOOL      Optional tool name on the MCP server; default search_proxy_tavily_search
   GROK_OUTPUT_DIR      Optional directory for full answer when preview is truncated
 `;
 }
@@ -73,6 +88,7 @@ function parseArgs(argv) {
   let responsesAllowedXHandles = null;
   let responsesExcludedXHandles = null;
   let responsesOpenRouterEngine = "";
+  let days = null;
 
   while (args.length) {
     const arg = args.shift();
@@ -198,6 +214,14 @@ function parseArgs(argv) {
       maxChars = parseIntOption("--max-chars", arg.slice("--max-chars=".length), { min: 0 });
       continue;
     }
+    if (arg === "--days") {
+      days = parseIntOption("--days", args.shift(), { min: 1 });
+      continue;
+    }
+    if (arg?.startsWith("--days=")) {
+      days = parseIntOption("--days", arg.slice("--days=".length), { min: 1 });
+      continue;
+    }
     if (arg?.startsWith("-")) throw new Error(`未知参数: ${arg}`);
     queryParts.push(arg);
   }
@@ -222,6 +246,7 @@ function parseArgs(argv) {
     responsesAllowedXHandles,
     responsesExcludedXHandles,
     responsesOpenRouterEngine,
+    days,
   };
 }
 
@@ -233,18 +258,60 @@ function providerAttempt(result) {
     ...(result.skipped ? { skipped: true } : {}),
     ...(result.auth_mode ? { auth_mode: result.auth_mode } : {}),
     ...(result.credits_used == null ? {} : { credits_used: result.credits_used }),
+    ...(result.tavily_key_index == null ? {} : { tavily_key_index: result.tavily_key_index }),
+    ...(result.tavily_key_total == null ? {} : { tavily_key_total: result.tavily_key_total }),
+    ...(result.tavily_keys_tried == null ? {} : { tavily_keys_tried: result.tavily_keys_tried }),
     ...(result.error ? { error: result.error } : {}),
   };
 }
 
-function extraAllocation(limit, config) {
-  if (limit <= 0) return { tavily: 0, firecrawl: 0 };
-  if (!config.tavilyApiKey) return { tavily: 0, firecrawl: limit };
-  const tavily = Math.ceil(limit / 2);
-  return { tavily, firecrawl: limit - tavily };
+function providerWeight(weights, name, fallback) {
+  const value = weights?.[name];
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
-async function extraSources(query, limit, config) {
+function extraAllocation(limit, config) {
+  if (limit <= 0) return { tavily: 0, firecrawl: 0, fathom: 0, mcpTavily: 0 };
+
+  const weights = config?.providerWeights || {};
+  const providers = [];
+
+  if (hasTavilyApiKey(config)) {
+    providers.push({ name: "tavily", weight: providerWeight(weights, "tavily", 25) });
+  }
+  if (config?.firecrawlApiKey || config?.firecrawlApiUrl) {
+    providers.push({ name: "firecrawl", weight: providerWeight(weights, "firecrawl", 25) });
+  }
+  if (hasFathomApiKey(config)) {
+    providers.push({ name: "fathom", weight: providerWeight(weights, "fathom", 25) });
+  }
+  if (hasMcpTavilyConfig(config)) {
+    providers.push({ name: "mcpTavily", weight: providerWeight(weights, "mcpTavily", 25) });
+  }
+
+  if (providers.length === 0) return { tavily: 0, firecrawl: 0, fathom: 0, mcpTavily: 0 };
+
+  let totalWeight = providers.reduce((sum, p) => sum + p.weight, 0);
+  // 显式权重全为 0 时退化为等权重，避免除以 0 产生 NaN 配额。
+  if (totalWeight <= 0) {
+    for (const p of providers) p.weight = 1;
+    totalWeight = providers.length;
+  }
+  const allocation = { tavily: 0, firecrawl: 0, fathom: 0, mcpTavily: 0 };
+  let allocated = 0;
+
+  for (let i = 0; i < providers.length - 1; i++) {
+    const count = Math.round((limit * providers[i].weight) / totalWeight);
+    allocation[providers[i].name] = count;
+    allocated += count;
+  }
+
+  allocation[providers[providers.length - 1].name] = limit - allocated;
+
+  return allocation;
+}
+
+async function extraSources(query, limit, config, days = null) {
   const warnings = [];
   const providerRaw = {};
   const allocation = extraAllocation(limit, config);
@@ -253,10 +320,13 @@ async function extraSources(query, limit, config) {
   }
 
   const jobs = [];
-  if (allocation.tavily > 0) jobs.push(tavilySearch(query, allocation.tavily, config));
+  if (allocation.tavily > 0) jobs.push(tavilySearch(query, allocation.tavily, config, days));
   if (allocation.firecrawl > 0) jobs.push(firecrawlSearch(query, allocation.firecrawl, config));
+  if (allocation.fathom > 0) jobs.push(fathomSearch(query, allocation.fathom, config));
+  if (allocation.mcpTavily > 0) jobs.push(mcpTavilySearch(query, allocation.mcpTavily, config, days));
   const results = await Promise.all(jobs);
   const sources = [];
+  const droppedSources = [];
   const providerAttempts = [];
 
   for (const result of results) {
@@ -266,12 +336,23 @@ async function extraSources(query, limit, config) {
     else warnings.push(`${result.provider} extra source search failed: ${result.error || "unknown error"}`);
   }
 
+  let filtered = sources;
+  if (days !== null && Number.isFinite(days) && days > 0 && filtered.length) {
+    const recency = filterByRecency(filtered, { days });
+    filtered = recency.sources;
+    if (recency.dropped.length) {
+      warnings.push(`--days ${days} dropped ${recency.dropped.length} source(s) older than ${days} day(s) (best-effort date parse).`);
+      droppedSources.push(...recency.dropped);
+    }
+  }
+
   return {
-    sources: sources.slice(0, limit),
+    sources: filtered.slice(0, limit),
     warnings,
     provider_attempts: providerAttempts,
     provider_raw: providerRaw,
     allocation,
+    dropped: droppedSources,
   };
 }
 
@@ -407,7 +488,7 @@ function clipText(value, max = 800) {
 
 function degradedAnswer(sources) {
   const lines = [
-    "> ⚠️ Grok Responses 额度已耗尽。以下为 Tavily / Firecrawl 原始搜索结果，未经 Grok 综合生成。",
+    "> ⚠️ Grok Responses 不可用。以下为 Tavily / Firecrawl / Fathom / MCP Tavily 原始搜索结果，未经 Grok 综合生成。",
     "",
   ];
   const groups = new Map();
@@ -417,7 +498,17 @@ function degradedAnswer(sources) {
     groups.get(provider).push(source);
   }
   for (const [provider, items] of groups) {
-    lines.push(`## ${provider === "tavily" ? "Tavily" : provider === "firecrawl" ? "Firecrawl" : provider}`);
+    const providerName =
+      provider === "tavily"
+        ? "Tavily"
+        : provider === "firecrawl"
+          ? "Firecrawl"
+          : provider === "fathom"
+            ? "Fathom"
+            : provider === "mcpTavily"
+              ? "MCP Tavily"
+              : provider;
+    lines.push(`## ${providerName}`);
     lines.push("");
     for (const [index, source] of items.entries()) {
       const title = String(source.title || `Result ${index + 1}`).trim();
@@ -430,27 +521,31 @@ function degradedAnswer(sources) {
   return lines.join("\n").trim();
 }
 
-function failureDiagnostics(config, searchOptions, extraOptions, extra, error, { quota = false } = {}) {
+function failureDiagnostics(config, searchOptions, extraOptions, extra, error, { quota = false, days = null } = {}) {
   const warning = quota
     ? "Grok Responses quota was exhausted."
     : `Responses search failed: ${error.message}`;
+  const rateLimited = error?.status === 429;
   return {
     grok_endpoint: "responses",
     ...(quota ? { grok_error: { code: "QUOTA_EXHAUSTED", message: error.message } } : {}),
+    ...(rateLimited ? { rate_limited: true } : {}),
     warnings: [warning, ...(extra?.warnings || []), ...(error?.diagnostics?.warnings || [])],
     provider_attempts: [grokFailureAttempt(config, error), ...(extra?.provider_attempts || [])],
     options: {
       api_provider: config.apiProvider,
       extra: extraOptions.limit,
       extra_mode: extraOptions.mode,
-      extra_allocation: extra?.allocation || { tavily: 0, firecrawl: 0 },
+      extra_allocation: extra?.allocation || { tavily: 0, firecrawl: 0, fathom: 0, mcpTavily: 0 },
       firecrawl_auth_mode: extraOptions.limit > 0 ? firecrawlAuthMode(config) : null,
+      days: days ?? null,
+      days_dropped: extra?.dropped?.length || 0,
       ...responsesDiagnosticOptions(searchOptions),
     },
   };
 }
 
-async function publicResult(args, config) {
+export async function publicResult(args, config) {
   const searchOptions = resolveSearchOptions(args, config);
   const sourceChars = args.sourceChars ?? config.sourceChars;
   const extraOptions = resolveExtra(args, config);
@@ -458,39 +553,66 @@ async function publicResult(args, config) {
     (value) => ({ ok: true, value }),
     (error) => ({ ok: false, error })
   );
-  const [grokResult, extra] = await Promise.all([grokPromise, extraSources(args.query, extraOptions.limit, config)]);
+  const [grokResult, extra] = await Promise.all([grokPromise, extraSources(args.query, extraOptions.limit, config, args.days)]);
 
   let grok;
   let degraded = false;
   let grokError = null;
+  // GROK_RESPONSES_NO_SOURCES / EMPTY 代表代理 stateless 回显或空应答——对下游不可用，
+  // 即使 --no-extra 也降级、不 throw（保底不报错，让 discover/下游拿到可解析 JSON + degraded 标志）。
+  const noUsable =
+    !grokResult.ok &&
+    (grokResult.error?.code === "GROK_RESPONSES_NO_SOURCES" || grokResult.error?.code === "GROK_RESPONSES_EMPTY");
   if (grokResult.ok) {
     grok = grokResult.value;
-  } else {
-    const quota = isQuotaExhaustedError(grokResult.error);
-    if (!quota) {
-      grokResult.error.diagnostics = failureDiagnostics(config, searchOptions, extraOptions, extra, grokResult.error);
-      throw grokResult.error;
-    }
-    if (extraOptions.limit <= 0 || !extra.sources.length) {
-      const error = new Error(
-        extraOptions.limit <= 0
-          ? "Grok Responses 额度已耗尽；extra sources 已显式关闭，无法降级"
-          : "Grok Responses 额度已耗尽，且 Tavily/Firecrawl 未返回可用结果"
-      );
-      error.code = "GROK_QUOTA_EXHAUSTED";
-      error.diagnostics = failureDiagnostics(config, searchOptions, extraOptions, extra, grokResult.error, { quota: true });
-      throw error;
-    }
+  } else if (noUsable) {
     degraded = true;
-    grokError = { code: "QUOTA_EXHAUSTED", message: grokResult.error.message };
+    grokError = { code: "GROK_NO_USABLE", message: grokResult.error.message };
+    const degradedWarning =
+      `Grok Responses 返回文本但无可用 URL 卡片（或空应答，代理 stateless 回显）；当前 answer 仅包含 Tavily/Firecrawl/Fathom/MCP Tavily 原始搜索结果，未经 Grok 综合生成。错误: ${grokResult.error.message}`;
+    const warnings = [degradedWarning, ...(extra?.warnings || []), ...(grokResult.error?.diagnostics?.warnings || [])];
     grok = {
       endpoint: "responses",
       model: searchOptions.model,
       answer: degradedAnswer(extra.sources),
       sources: [],
-      warnings: [
-        "Grok Responses 因额度耗尽不可用；当前 answer 仅包含 Tavily/Firecrawl 原始搜索结果，未经 Grok 综合生成。",
+      warnings,
+      provider_attempts: [
+        grokFailureAttempt(config, grokResult.error),
+        ...(extra?.provider_attempts || []),
       ],
+      diagnostics: {
+        ...(grokResult.error?.diagnostics || {}),
+        warnings,
+      },
+      raw_content_chars: 0,
+    };
+  } else {
+    const quota = isQuotaExhaustedError(grokResult.error);
+    if (extraOptions.limit <= 0 || !extra.sources.length) {
+      const errorMsg = extraOptions.limit <= 0
+        ? `Grok Responses 失败；extra sources 已显式关闭，无法降级。错误: ${grokResult.error.message}`
+        : quota
+          ? "Grok Responses 额度已耗尽，且 Tavily/Firecrawl/Fathom/MCP Tavily 未返回可用结果"
+          : `Grok Responses 失败，且 Tavily/Firecrawl/Fathom/MCP Tavily 未返回可用结果。错误: ${grokResult.error.message}`;
+      const error = new Error(errorMsg);
+      error.code = quota ? "GROK_QUOTA_EXHAUSTED" : "GROK_FAILED";
+      error.diagnostics = failureDiagnostics(config, searchOptions, extraOptions, extra, grokResult.error, { quota, days: args.days });
+      throw error;
+    }
+    degraded = true;
+    grokError = quota
+      ? { code: "QUOTA_EXHAUSTED", message: grokResult.error.message }
+      : { code: "GROK_ERROR", message: grokResult.error.message };
+    const degradedWarning = quota
+      ? "Grok Responses 因额度耗尽不可用；当前 answer 仅包含 Tavily/Firecrawl/Fathom/MCP Tavily 原始搜索结果，未经 Grok 综合生成。"
+      : `Grok Responses 不可用（${grokResult.error.message}）；当前 answer 仅包含 Tavily/Firecrawl/Fathom/MCP Tavily 原始搜索结果，未经 Grok 综合生成。`;
+    grok = {
+      endpoint: "responses",
+      model: searchOptions.model,
+      answer: degradedAnswer(extra.sources),
+      sources: [],
+      warnings: [degradedWarning],
       provider_attempts: [grokFailureAttempt(config, grokResult.error)],
       diagnostics: {},
       raw_content_chars: 0,
@@ -533,6 +655,16 @@ async function publicResult(args, config) {
   const sources = { grok: grokCompact, extra: extraCompact, merged: mergedCompact, raw_path: rawPath };
   if (args.fullSources) sources.raw = rawPayload;
 
+  const grokSucceeded = !degraded;
+  const extraSucceeded = extra.sources.length > 0;
+  const status = grokSucceeded && extraSucceeded
+    ? "success"
+    : grokSucceeded && !extraSucceeded
+      ? "partial_success"
+      : !grokSucceeded && extraSucceeded
+        ? "degraded_success"
+        : "total_failure";
+
   return {
     query: args.query,
     platform: args.platform || null,
@@ -546,6 +678,7 @@ async function publicResult(args, config) {
     },
     sources,
     diagnostics: {
+      status,
       grok_endpoint: "responses",
       ...grok.diagnostics,
       ...(degraded ? { degraded: true, grok_error: grokError } : {}),
@@ -560,6 +693,8 @@ async function publicResult(args, config) {
         source_chars: sourceChars,
         max_chars: args.maxChars,
         full_sources: args.fullSources,
+        days: args.days ?? null,
+        days_dropped: extra.dropped?.length || 0,
         ...responsesDiagnosticOptions(searchOptions),
       },
       raw_grok_content_chars: grok.raw_content_chars,
@@ -568,10 +703,11 @@ async function publicResult(args, config) {
   };
 }
 
-function errorOutput(error, code, diagnostics = {}) {
+export function errorOutput(status, code, diagnostics = {}) {
   return {
-    error: { message: error.message, code },
+    error: { message: status.message, code },
     diagnostics: {
+      status: "total_failure",
       warnings: [],
       provider_attempts: [],
       searched_at: new Date().toISOString(),
@@ -580,21 +716,27 @@ function errorOutput(error, code, diagnostics = {}) {
   };
 }
 
-let stage = "argument";
-try {
-  const args = parseArgs(process.argv.slice(2));
-  if (args.help) {
-    console.log(usage());
-    process.exit(0);
+// Runs only when search.js is the entry script (not when imported by a test).
+const isMain =
+  typeof process !== "undefined" && process.argv?.[1] &&
+  process.argv[1].endsWith("scripts/search.js");
+if (isMain) {
+  let stage = "argument";
+  try {
+    const args = parseArgs(process.argv.slice(2));
+    if (args.help) {
+      console.log(usage());
+      process.exit(0);
+    }
+    stage = "config";
+    const config = await loadConfig({ requireGrok: true });
+    await cleanupOutputDir(config);
+    stage = "search";
+    printJson(await publicResult(args, config));
+  } catch (error) {
+    const code = error.code || (stage === "argument" ? "ARGUMENT_ERROR" : stage === "search" ? "SEARCH_ERROR" : "RUNTIME_ERROR");
+    printJson(errorOutput(error, code, error.diagnostics));
+    console.error(error.message);
+    process.exitCode = stage === "argument" ? 2 : 1;
   }
-  stage = "config";
-  const config = await loadConfig({ requireGrok: true });
-  await cleanupOutputDir(config);
-  stage = "search";
-  printJson(await publicResult(args, config));
-} catch (error) {
-  const code = error.code || (stage === "argument" ? "ARGUMENT_ERROR" : stage === "search" ? "SEARCH_ERROR" : "RUNTIME_ERROR");
-  printJson(errorOutput(error, code, error.diagnostics));
-  console.error(error.message);
-  process.exitCode = stage === "argument" ? 2 : 1;
 }

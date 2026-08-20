@@ -6,9 +6,13 @@ import { fetchUrl } from "./lib/providers.js";
 const DEFAULT_MAX_CHARS = 12000;
 
 function usage() {
-  return `Usage: ./scripts/fetch.js [--provider auto|tavily|firecrawl|direct] [--max-chars N] <url>
+  return `Usage: ./scripts/fetch.js [--provider auto|tavily|firecrawl|direct] [--max-chars N] [--full-path] <url>
 
 Fetch a web page as readable text/Markdown using Tavily Extract, Firecrawl Scrape, then Direct Fetch.
+
+Options:
+  --max-chars N  Truncate output to N chars (default: 12000)
+  --full-path    Include full output file path in JSON (off by default)
 
 Environment:
   TAVILY_API_KEY       Tavily key used by the primary provider
@@ -31,6 +35,7 @@ function parseArgs(argv) {
   const args = [...argv];
   let provider = "auto";
   let maxChars = DEFAULT_MAX_CHARS;
+  let fullPath = false;
   let url;
 
   while (args.length) {
@@ -52,6 +57,10 @@ function parseArgs(argv) {
     }
     if (arg?.startsWith("--max-chars=")) {
       maxChars = parseIntOption("--max-chars", arg.slice("--max-chars=".length), { min: 0 });
+      continue;
+    }
+    if (arg === "--full-path") {
+      fullPath = true;
       continue;
     }
     if (arg?.startsWith("-")) {
@@ -78,7 +87,7 @@ function parseArgs(argv) {
     throw new Error("URL 必须使用 http 或 https 协议");
   }
 
-  return { url: parsed.toString(), provider, maxChars };
+  return { url: parsed.toString(), provider, maxChars, fullPath };
 }
 
 async function publicResult(args, result, config) {
@@ -131,7 +140,7 @@ async function publicResult(args, result, config) {
       chars: contentInfo.preview.length,
       original_chars: contentInfo.original_length,
       truncated: contentInfo.truncated,
-      full_path: contentInfo.full_output_path,
+      ...(args.fullPath ? { full_path: contentInfo.full_output_path } : {}),
     },
     diagnostics,
   };

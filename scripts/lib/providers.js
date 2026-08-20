@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { configureProxyFromEnv } from "./proxy.js";
 
 configureProxyFromEnv();
@@ -5,6 +8,9 @@ configureProxyFromEnv();
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const DIRECT_FETCH_MAX_BYTES = 2 * 1024 * 1024;
 const DIRECT_ERROR_PREVIEW_BYTES = 1000;
+const DEFAULT_TAVILY_RR_PATH = path.join(homedir(), ".cache", "grok-search", "tavily-rr.json");
+const QUOTA_OR_KEY_MESSAGE =
+  /insufficient[_-]?quota|quota[_-]?exhausted|credits?[_-]?exhausted|insufficient[_-]?credits?|payment[_-]?required|invalid.?api.?key|unauthorized|api.?key.*(invalid|expired|revoked)|额度|余额|计费/i;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -15,13 +21,174 @@ function trimBody(text, max = 500) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+export function allTavilyKeys(config) {
+  if (Array.isArray(config?.tavilyApiKeys) && config.tavilyApiKeys.length) {
+    return config.tavilyApiKeys.map((k) => String(k || "").trim()).filter(Boolean);
+  }
+  if (typeof config?.tavilyApiKey === "string" && config.tavilyApiKey.trim()) {
+    return [config.tavilyApiKey.trim()];
+  }
+  return [];
+}
+
 function redactSecrets(text, config) {
   let out = String(text || "");
-  for (const secret of [config?.grokApiKey, config?.tavilyApiKey, config?.firecrawlApiKey]) {
+  const secrets = [config?.grokApiKey, config?.firecrawlApiKey, config?.fathomApiKey, config?.mcpTavilyToken, ...allTavilyKeys(config)];
+  for (const secret of secrets) {
     if (typeof secret !== "string" || secret.length < 4) continue;
     out = out.split(secret).join("***");
   }
   return out;
+}
+
+export function tavilyRoundRobinPath(config) {
+  if (typeof config?.tavilyRoundRobinPath === "string" && config.tavilyRoundRobinPath.trim()) {
+    return config.tavilyRoundRobinPath.trim();
+  }
+  return DEFAULT_TAVILY_RR_PATH;
+}
+
+/** Read persistent next index; returns 0 on missing/corrupt. */
+export function loadTavilyRoundRobinIndex(keyCount, config) {
+  if (!Number.isFinite(keyCount) || keyCount <= 0) return 0;
+  try {
+    const raw = readFileSync(tavilyRoundRobinPath(config), "utf8");
+    const data = JSON.parse(raw);
+    const n = Number(data?.nextIndex);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.trunc(n) % keyCount;
+  } catch {
+    return 0;
+  }
+}
+
+/** Persist next index for subsequent CLI processes. Best-effort. */
+export function saveTavilyRoundRobinIndex(nextIndex, config) {
+  try {
+    const filePath = tavilyRoundRobinPath(config);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const payload = `${JSON.stringify({ nextIndex: Math.max(0, Math.trunc(nextIndex)), updatedAt: new Date().toISOString() })}\n`;
+    writeFileSync(filePath, payload, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // ignore — RR degrades to always-start-at-0
+  }
+}
+
+export function hasTavilyApiKey(config) {
+  return allTavilyKeys(config).length > 0;
+}
+
+export function hasFathomApiKey(config) {
+  return typeof config?.fathomApiKey === "string" && config.fathomApiKey.trim().length > 0;
+}
+
+export function hasMcpTavilyConfig(config) {
+  return typeof config?.mcpTavilyToken === "string" && config.mcpTavilyToken.trim().length > 0;
+}
+
+/**
+ * Claim next RR slot (persistent across processes). Returns { key, index, total }.
+ * Advances cursor immediately so concurrent/next CLI runs spread load.
+ */
+export function nextTavilyApiKey(config) {
+  const keys = allTavilyKeys(config);
+  if (!keys.length) return null;
+  const index = loadTavilyRoundRobinIndex(keys.length, config);
+  saveTavilyRoundRobinIndex(index + 1, config);
+  return { key: keys[index], index, total: keys.length };
+}
+
+function parseHttpStatusFromMessage(message) {
+  const match = String(message || "").match(/\bHTTP\s+(\d{3})\b/i);
+  if (!match) return undefined;
+  const status = Number.parseInt(match[1], 10);
+  return Number.isFinite(status) ? status : undefined;
+}
+
+export function isTavilyKeyExhaustedError(error) {
+  const msg = String(error?.message || error || "");
+  const status = error?.status ?? parseHttpStatusFromMessage(msg);
+
+  if (status === 401 || status === 402) return true;
+  // 403 only when message points at key/auth, not content policy.
+  if (status === 403) return /invalid.?api.?key|unauthorized|forbidden.*(?:api.?key|token)|api.?key/i.test(msg);
+  if (status === 429) return /quota|credit|balance|billing|limit|额度|余额|计费/i.test(msg);
+  return QUOTA_OR_KEY_MESSAGE.test(msg);
+}
+
+function shouldRetryHttpError(error) {
+  // No HTTP status (network/timeout): keep original retry behavior via caller.
+  if (!error?.status) return true;
+  if (error.status === 401 || error.status === 402 || error.status === 403) return false;
+  if (error.status === 429 && isTavilyKeyExhaustedError(error)) return false;
+  return RETRYABLE_STATUS.has(error.status);
+}
+
+/**
+ * Run fn(apiKey) starting at persistent RR index; on quota/auth failure try remaining keys once each.
+ */
+export async function withTavilyApiKey(config, fn) {
+  const keys = allTavilyKeys(config);
+  if (!keys.length) {
+    return { skipped: true, error: "TAVILY_API_KEY 未配置" };
+  }
+
+  const claimed = nextTavilyApiKey(config);
+  const start = claimed?.index ?? 0;
+
+  let lastError = "Tavily request failed";
+  let tried = 0;
+  for (let offset = 0; offset < keys.length; offset += 1) {
+    const index = (start + offset) % keys.length;
+    const apiKey = keys[index];
+    tried += 1;
+    try {
+      const result = await fn(apiKey, index, keys.length);
+      if (result?.ok) {
+        return {
+          ...result,
+          tavily_key_index: index,
+          tavily_key_total: keys.length,
+          tavily_keys_tried: tried,
+        };
+      }
+      const softError = {
+        status: parseHttpStatusFromMessage(result?.error),
+        message: String(result?.error || ""),
+      };
+      if (offset < keys.length - 1 && isTavilyKeyExhaustedError(softError)) {
+        lastError = softError.message || lastError;
+        debugLog(config, `tavily key#${index} soft-fail, try next: ${lastError}`);
+        continue;
+      }
+      return {
+        ...result,
+        tavily_key_index: index,
+        tavily_key_total: keys.length,
+        tavily_keys_tried: tried,
+      };
+    } catch (error) {
+      lastError = error?.message || String(error);
+      if (offset < keys.length - 1 && isTavilyKeyExhaustedError(error)) {
+        debugLog(config, `tavily key#${index} exhausted/auth, try next: ${lastError}`);
+        continue;
+      }
+      return {
+        ok: false,
+        error: lastError,
+        tavily_key_index: index,
+        tavily_key_total: keys.length,
+        tavily_keys_tried: tried,
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    error: lastError,
+    tavily_key_total: keys.length,
+    tavily_keys_tried: tried,
+  };
 }
 
 export function retryAfterMs(headers) {
@@ -88,8 +255,7 @@ export async function requestJson(url, { headers, body, timeoutMs, config, retry
       }
 
       const canRetry =
-        attempt < maxAttempts - 1 &&
-        (lastError.retryable || !lastError.status || RETRYABLE_STATUS.has(lastError.status));
+        attempt < maxAttempts - 1 && (lastError.retryable || shouldRetryHttpError(lastError));
       if (!canRetry) break;
 
       const waitMs = lastError.retryAfterMs ?? backoffMs(config, attempt);
@@ -119,14 +285,14 @@ function firecrawlHeaders(config) {
 }
 
 export async function tavilyExtract(url, config) {
-  if (!config.tavilyApiKey) {
+  if (!hasTavilyApiKey(config)) {
     return { ok: false, provider: "tavily", skipped: true, error: "TAVILY_API_KEY 未配置" };
   }
 
   const endpoint = `${config.tavilyApiUrl.replace(/\/+$/, "")}/extract`;
-  try {
+  const outcome = await withTavilyApiKey(config, async (apiKey) => {
     const data = await requestJson(endpoint, {
-      headers: authHeaders(config.tavilyApiKey),
+      headers: authHeaders(apiKey),
       body: { urls: [url], format: "markdown" },
       timeoutMs: 60_000,
       config,
@@ -146,9 +312,12 @@ export async function tavilyExtract(url, config) {
       error: failed?.error || failed?.message || "Tavily Extract 返回空内容",
       raw: data,
     };
-  } catch (error) {
-    return { ok: false, provider: "tavily", error: error.message };
+  });
+
+  if (outcome.skipped) {
+    return { ok: false, provider: "tavily", skipped: true, error: outcome.error };
   }
+  return { provider: "tavily", ...outcome };
 }
 
 export async function firecrawlScrape(url, config) {
@@ -200,12 +369,12 @@ export async function firecrawlScrape(url, config) {
   return { ok: false, provider: "firecrawl", auth_mode: authMode, error: lastError };
 }
 
-function sourceFromTavily(result) {
+export function sourceFromTavily(result, provider = "tavily") {
   const url = typeof result?.url === "string" ? result.url.trim() : "";
   if (!url) return null;
   return {
     url,
-    provider: "tavily",
+    provider,
     ...(result.title ? { title: String(result.title).trim() } : {}),
     ...(result.content ? { description: String(result.content).trim() } : {}),
     ...(result.published_date ? { published_date: String(result.published_date).trim() } : {}),
@@ -224,31 +393,40 @@ function sourceFromFirecrawl(result) {
   };
 }
 
-export async function tavilySearch(query, limit, config) {
-  if (!config.tavilyApiKey) {
+export async function tavilySearch(query, limit, config, days = null) {
+  if (!hasTavilyApiKey(config)) {
     return { ok: false, provider: "tavily", skipped: true, error: "TAVILY_API_KEY 未配置", sources: [] };
   }
 
   const endpoint = `${config.tavilyApiUrl.replace(/\/+$/, "")}/search`;
-  try {
+  const outcome = await withTavilyApiKey(config, async (apiKey) => {
+    const body = {
+      query,
+      max_results: limit,
+      search_depth: "advanced",
+      include_raw_content: false,
+      include_answer: false,
+    };
+
+    if (days !== null && Number.isFinite(days) && days > 0) {
+      body.days = days;
+    }
+
     const data = await requestJson(endpoint, {
-      headers: authHeaders(config.tavilyApiKey),
-      body: {
-        query,
-        max_results: limit,
-        search_depth: "advanced",
-        include_raw_content: false,
-        include_answer: false,
-      },
+      headers: authHeaders(apiKey),
+      body,
       timeoutMs: 90_000,
       config,
       retry: true,
     });
-    const sources = (Array.isArray(data?.results) ? data.results : []).map(sourceFromTavily).filter(Boolean);
+    const sources = (Array.isArray(data?.results) ? data.results : []).map((result) => sourceFromTavily(result)).filter(Boolean);
     return { ok: true, provider: "tavily", sources, raw: data };
-  } catch (error) {
-    return { ok: false, provider: "tavily", error: error.message, sources: [] };
+  });
+
+  if (outcome.skipped) {
+    return { ok: false, provider: "tavily", skipped: true, error: outcome.error, sources: [] };
   }
+  return { provider: "tavily", sources: [], ...outcome };
 }
 
 export async function firecrawlSearch(query, limit, config) {
@@ -283,8 +461,201 @@ export async function firecrawlSearch(query, limit, config) {
   }
 }
 
+export async function fathomSearch(query, limit, config) {
+  if (!hasFathomApiKey(config)) {
+    return { ok: false, provider: "fathom", skipped: true, error: "FATHOM_API_KEY 未配置", sources: [] };
+  }
+
+  try {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+
+    const transport = new StdioClientTransport({
+      command: "npx",
+      args: ["-y", "@fathom-search/mcp-server"],
+      env: {
+        ...process.env,
+        FATHOM_API_KEY: config.fathomApiKey,
+        FATHOM_API_URL: config.fathomApiUrl || "https://fathomsearch.xyz/mcp",
+      },
+    });
+
+    const client = new Client(
+      { name: "grok-search", version: "0.1.0" },
+      { capabilities: {} }
+    );
+
+    await client.connect(transport);
+
+    const toolName = config.fathomSearchTool || "mega_search";
+    const toolArgs = {
+      query,
+      max_results: limit,
+    };
+
+    if (config.fathomEngines && config.fathomEngines.trim()) {
+      toolArgs.engines = config.fathomEngines.trim();
+    }
+
+    const response = await client.callTool({ name: toolName, arguments: toolArgs });
+
+    await client.close();
+
+    if (!response || !Array.isArray(response.content)) {
+      return { ok: false, provider: "fathom", error: "Fathom 返回格式无效", sources: [] };
+    }
+
+    const textContent = response.content.find((c) => c.type === "text");
+    if (!textContent || !textContent.text) {
+      return { ok: false, provider: "fathom", error: "Fathom 未返回文本内容", sources: [] };
+    }
+
+    let data;
+    try {
+      data = JSON.parse(textContent.text);
+    } catch {
+      return { ok: false, provider: "fathom", error: "Fathom 返回的 JSON 解析失败", sources: [] };
+    }
+
+    const rawResults = Array.isArray(data?.results) ? data.results : [];
+    const sources = rawResults
+      .map((r) => {
+        if (!r || typeof r.url !== "string" || !r.url.trim()) return null;
+        return {
+          url: r.url.trim(),
+          provider: "fathom",
+          ...(r.title ? { title: String(r.title).trim() } : {}),
+          ...(r.snippet ? { snippet: String(r.snippet).trim() } : {}),
+          ...(r.description ? { description: String(r.description).trim() } : {}),
+        };
+      })
+      .filter(Boolean);
+
+    return { ok: true, provider: "fathom", sources, raw: data };
+  } catch (error) {
+    return { ok: false, provider: "fathom", error: error.message, sources: [] };
+  }
+}
+
+const TRANSIENT_MCP_TAVILY_PATTERN =
+  /fetch failed|econnreset|econnrefused|econnaborted|eai_again|eai_noname|enetdown|enetunreach|ehostunreach|etimedout|epipe|socket hang up|connection reset|connection refused|network error/i;
+
+export function isTransientMcpTavilyError(error) {
+  const text = `${error?.message || ""} ${error?.cause?.code || ""} ${error?.cause?.message || ""}`.toLowerCase();
+  return TRANSIENT_MCP_TAVILY_PATTERN.test(text);
+}
+
+function mcpTavilyErrorDetail(error) {
+  const message = error?.message || "unknown error";
+  const cause = error?.cause;
+  if (!cause) return message;
+  const detail = cause.code || cause.message || String(cause);
+  return detail ? `${message} (${detail})` : message;
+}
+
+async function mcpTavilyAttempt({ url, token, toolName, toolArgs }) {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    },
+  });
+
+  const client = new Client({ name: "grok-search", version: "0.1.0" }, { capabilities: {} });
+
+  const run = (async () => {
+    await client.connect(transport);
+    const response = await client.callTool({ name: toolName, arguments: toolArgs });
+    await client.close();
+    return response;
+  })();
+
+  let timeoutId;
+  const timeout = new Promise((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error("MCP Tavily 请求超时（>60s）"));
+      client.close().catch(() => {});
+    }, 60_000);
+  });
+
+  let response;
+  try {
+    response = await Promise.race([run, timeout]);
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return { ok: false, error };
+  }
+  clearTimeout(timeoutId);
+
+  if (!response || (!Array.isArray(response.content) && !response.structuredContent)) {
+    return { ok: false, error: new Error("MCP Tavily 返回格式无效") };
+  }
+
+  let data;
+  if (response.structuredContent) {
+    data = response.structuredContent;
+  } else {
+    const textContent = response.content.find((c) => c.type === "text");
+    if (!textContent || !textContent.text) {
+      return { ok: false, error: new Error("MCP Tavily 未返回文本内容") };
+    }
+    try {
+      data = JSON.parse(textContent.text);
+    } catch {
+      return { ok: false, error: new Error("MCP Tavily 返回的 JSON 解析失败") };
+    }
+  }
+
+  return { ok: true, data };
+}
+
+export async function mcpTavilySearch(query, limit, config, days = null) {
+  if (!hasMcpTavilyConfig(config)) {
+    return { ok: false, provider: "mcpTavily", skipped: true, error: "MCP_TAVILY_TOKEN 未配置", sources: [] };
+  }
+
+  try {
+    const toolName = config.mcpTavilyTool || "search_proxy_tavily_search";
+    const toolArgs = {
+      query,
+      max_results: limit,
+      search_depth: "advanced",
+    };
+    if (days !== null && Number.isFinite(days) && days > 0) {
+      toolArgs.days = days;
+    }
+
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) await sleep(300);
+      const outcome = await mcpTavilyAttempt({
+        url: config.mcpTavilyUrl,
+        token: config.mcpTavilyToken,
+        toolName,
+        toolArgs,
+      });
+      if (outcome.ok) {
+        const rawResults = Array.isArray(outcome.data?.results) ? outcome.data.results : [];
+        const sources = rawResults.map((result) => sourceFromTavily(result, "mcpTavily")).filter(Boolean);
+        return { ok: true, provider: "mcpTavily", sources, raw: outcome.data };
+      }
+      lastError = outcome.error;
+      if (!isTransientMcpTavilyError(outcome.error)) break;
+    }
+
+    return { ok: false, provider: "mcpTavily", error: mcpTavilyErrorDetail(lastError), sources: [] };
+  } catch (error) {
+    return { ok: false, provider: "mcpTavily", error: mcpTavilyErrorDetail(error), sources: [] };
+  }
+}
+
 export async function tavilyMap(url, options, config) {
-  if (!config.tavilyApiKey) {
+  if (!hasTavilyApiKey(config)) {
     return { ok: false, provider: "tavily", skipped: true, error: "TAVILY_API_KEY 未配置", results: [] };
   }
 
@@ -298,9 +669,9 @@ export async function tavilyMap(url, options, config) {
   };
   if (options.instructions) body.instructions = options.instructions;
 
-  try {
+  const outcome = await withTavilyApiKey(config, async (apiKey) => {
     const data = await requestJson(endpoint, {
-      headers: authHeaders(config.tavilyApiKey),
+      headers: authHeaders(apiKey),
       body,
       timeoutMs: (options.timeout + 10) * 1000,
       config,
@@ -314,9 +685,12 @@ export async function tavilyMap(url, options, config) {
       response_time: data?.response_time ?? null,
       raw: data,
     };
-  } catch (error) {
-    return { ok: false, provider: "tavily", error: error.message, results: [] };
+  });
+
+  if (outcome.skipped) {
+    return { ok: false, provider: "tavily", skipped: true, error: outcome.error, results: [] };
   }
+  return { provider: "tavily", results: [], ...outcome };
 }
 
 function withTimeout(timeoutMs) {

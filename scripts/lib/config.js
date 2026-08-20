@@ -15,6 +15,7 @@ const DEFAULT_EXTRA = 6;
 const DEFAULT_SOURCE_CHARS = 400;
 const DEFAULT_TAVILY_API_URL = "https://api.tavily.com";
 const DEFAULT_FIRECRAWL_API_URL = "https://api.firecrawl.dev/v2";
+const DEFAULT_MCP_TAVILY_URL = "https://search.604020.xyz/mcp";
 const DEFAULT_OUTPUT_DIR = path.join(homedir(), ".cache", "grok-search", "outputs");
 const DEFAULT_OUTPUT_RETENTION_DAYS = 30;
 const DEFAULT_RESPONSES_MAX_TURNS = 3;
@@ -117,6 +118,71 @@ function envOrFileList(envName, fileConfig, keys, fallback = []) {
   if (envValue != null) return parseListValue(envValue);
   const configValue = fileValue(fileConfig, keys);
   return configValue == null ? fallback : parseListValue(configValue);
+}
+
+function dedupeStrings(items) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const value = String(item || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function parseProviderWeights(value) {
+  if (value == null) return undefined;
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const out = {};
+    for (const [key, weight] of Object.entries(value)) {
+      if (Number.isFinite(weight)) out[key] = Number(weight);
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return parseProviderWeights(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveProviderWeights(fileConfig, getEnv) {
+  const fromEnv = parseProviderWeights(getEnv("GROK_PROVIDER_WEIGHTS"));
+  if (fromEnv) return fromEnv;
+  for (const key of ["providerWeights", "provider_weights", "GROK_PROVIDER_WEIGHTS"]) {
+    const fromFile = parseProviderWeights(fileConfig?.[key]);
+    if (fromFile) return fromFile;
+  }
+  return undefined;
+}
+
+/**
+ * Collect Tavily keys.
+ * Priority: TAVILY_API_KEYS env → TAVILY_API_KEY env → merge file tavilyApiKeys + tavilyApiKey.
+ * Empty tavilyApiKeys: [] does NOT suppress a valid tavilyApiKey.
+ * @param {object} fileConfig
+ * @param {(name: string) => string|undefined} [getEnv] injectable for tests
+ */
+export function resolveTavilyApiKeys(fileConfig, getEnv = env) {
+  const fromEnvMulti = getEnv("TAVILY_API_KEYS");
+  if (fromEnvMulti != null && String(fromEnvMulti).trim() !== "") {
+    return dedupeStrings(parseListValue(fromEnvMulti));
+  }
+
+  const fromEnvSingle = getEnv("TAVILY_API_KEY");
+  if (fromEnvSingle != null && String(fromEnvSingle).trim() !== "") {
+    return dedupeStrings(parseListValue(fromEnvSingle));
+  }
+
+  const multiRaw = fileValue(fileConfig, ["TAVILY_API_KEYS", "tavilyApiKeys", "tavily_api_keys"]);
+  const singleRaw = fileValue(fileConfig, ["TAVILY_API_KEY", "tavilyApiKey", "tavily_api_key"]);
+  const multi = multiRaw == null ? [] : dedupeStrings(parseListValue(multiRaw));
+  const single = singleRaw == null ? [] : dedupeStrings(parseListValue(singleRaw));
+  return dedupeStrings([...multi, ...single]);
 }
 
 function resolveUserPath(value) {
@@ -228,7 +294,11 @@ export async function loadConfig({ requireGrok = false } = {}) {
       DEFAULT_RESPONSES_OPENROUTER_ENGINE
     ),
     tavilyApiUrl: envOrFile("TAVILY_API_URL", fileConfig, ["TAVILY_API_URL", "tavilyApiUrl", "tavily_api_url"], DEFAULT_TAVILY_API_URL),
-    tavilyApiKey: envOrFile("TAVILY_API_KEY", fileConfig, ["TAVILY_API_KEY", "tavilyApiKey", "tavily_api_key"]),
+    // Multi-key: tavilyApiKeys[] (persistent RR). tavilyApiKey = first key for back-compat.
+    ...((tavilyApiKeys) => ({
+      tavilyApiKeys,
+      tavilyApiKey: tavilyApiKeys[0],
+    }))(resolveTavilyApiKeys(fileConfig)),
 
     firecrawlApiUrl: envOrFile(
       "FIRECRAWL_API_URL",
@@ -237,6 +307,21 @@ export async function loadConfig({ requireGrok = false } = {}) {
       DEFAULT_FIRECRAWL_API_URL
     ),
     firecrawlApiKey: envOrFile("FIRECRAWL_API_KEY", fileConfig, ["FIRECRAWL_API_KEY", "firecrawlApiKey", "firecrawl_api_key"]),
+
+    mcpTavilyUrl: envOrFile(
+      "MCP_TAVILY_URL",
+      fileConfig,
+      ["MCP_TAVILY_URL", "mcpTavilyUrl", "mcp_tavily_url"],
+      DEFAULT_MCP_TAVILY_URL
+    ),
+    mcpTavilyToken: envOrFile("MCP_TAVILY_TOKEN", fileConfig, ["MCP_TAVILY_TOKEN", "mcpTavilyToken", "mcp_tavily_token"]),
+    mcpTavilyTool: envOrFile(
+      "MCP_TAVILY_TOOL",
+      fileConfig,
+      ["MCP_TAVILY_TOOL", "mcpTavilyTool", "mcp_tavily_tool"],
+      "search_proxy_tavily_search"
+    ),
+    providerWeights: resolveProviderWeights(fileConfig, env),
 
     retryMaxAttempts: envInt("GROK_RETRY_MAX_ATTEMPTS", 3, { min: 1 }),
     retryMultiplier: envFloat("GROK_RETRY_MULTIPLIER", 1, { min: 0 }),

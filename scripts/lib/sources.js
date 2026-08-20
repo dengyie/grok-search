@@ -404,3 +404,98 @@ function pushSource(out, seen, source) {
 function isPlainObject(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
+
+// --- Recency filtering (best-effort, language-agnostic) ---------------------
+//
+// Native provider time filters (Tavily `days`) only work when the provider
+// returns a `published_date` and actually enforces it. Many keys/sources do
+// neither, so stale results leak through. This is a local fallback: parse a
+// published date from published_date / title / url / description, and drop any
+// source older than `days` days before `now`. Unparseable sources are kept —
+// position within provider results is a reasonable recency proxy, and dropping
+// everything we cannot date would over-prune legitimate current sources.
+
+// ASCII numeric dates: 2026-07-30, 2026/07/30, 2026-7-1. Separators are
+// strictly ascii ('-' or '/'); CN date forms have their own pattern below so
+// the month of "2026年7月 8種工具" can't be misread as a date separator.
+const ASCII_DATE_PATTERN = /(\d{4})[-/](\d{1,2})[-/](\d{1,2})/;
+const SLASH_DATE_PATTERN = /(\d{4})\/(\d{1,2})\/(\d{1,2})/;
+// CN dates: 2026年07月29日, casual "2024 年 3 月 1 日". Day anchored to a
+// trailing 日 so a bare "2026年7月" or "2026年7月 8種" stays undated, never
+// fabricated as day 1 (which would drop month-scoped recent sources).
+const CN_DATE_PATTERN = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/;
+const COMPACT_DATE_PATTERN = /(\d{4})(\d{2})(\d{2})/;
+
+function parseDate(text) {
+  const raw = String(text || "");
+  if (!raw) return null;
+
+  const slash = SLASH_DATE_PATTERN.exec(raw);
+  if (slash) return safeDate(Number(slash[1]), Number(slash[2]), Number(slash[3]));
+
+  const cn = CN_DATE_PATTERN.exec(raw);
+  if (cn) return safeDate(Number(cn[1]), Number(cn[2]), Number(cn[3]));
+
+  const ascii = ASCII_DATE_PATTERN.exec(raw);
+  if (ascii) return safeDate(Number(ascii[1]), Number(ascii[2]), Number(ascii[3]));
+
+  const compact = COMPACT_DATE_PATTERN.exec(raw);
+  if (compact) return safeDate(Number(compact[1]), Number(compact[2]), Number(compact[3]));
+
+  return null;
+}
+
+function safeDate(year, month, day) {
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(d.getTime())) return null;
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return null;
+  return d;
+}
+
+export function sourcePublishedDate(source) {
+  const candidates = [
+    source?.published_date,
+    source?.publishedDate,
+    source?.date,
+    source?.published,
+    source?.title,
+    source?.url,
+    source?.description,
+    source?.snippet,
+  ];
+  for (const candidate of candidates) {
+    if (candidate == null) continue;
+    const parsed = parseDate(candidate);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+// Returns { sources, dropped } where `sources` keeps items within `days` of `now`
+// plus any item whose date could not be determined. Mutates nothing.
+export function filterByRecency(sources, { days, now = new Date() } = {}) {
+  const list = Array.isArray(sources) ? sources : [];
+  if (!Number.isFinite(days) || days <= 0) return { sources: list, dropped: [] };
+
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (!Number.isFinite(nowMs)) return { sources: list, dropped: [] };
+  const cutoffMs = nowMs - days * 24 * 60 * 60 * 1000;
+
+  const kept = [];
+  const dropped = [];
+  for (const source of list) {
+    const date = sourcePublishedDate(source);
+    if (!date) {
+      kept.push(source);
+      continue;
+    }
+    if (date.getTime() >= cutoffMs) {
+      kept.push(source);
+    } else {
+      dropped.push(source);
+    }
+  }
+  return { sources: kept, dropped };
+}

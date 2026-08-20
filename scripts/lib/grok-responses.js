@@ -332,9 +332,16 @@ export function parseGrokResponses(data, { defaultTool = "web_search" } = {}) {
   const searched = extractSearchedSources(data, defaultTool);
   const sources = dedupeResponsesSources(citationSources, searched.sources);
 
+  // usable = 有答案文本 + 至少一个可采信 URL 卡片（sources 里的 url/title/date）。
+  // 某些代理（如 cpa.mangoqwq.com）对 Responses 工具 stateless 回显模型旧知识：返回 200 + output_text，
+  // 但 annotations 全空、无 function_call/web_search_call/搜索结果卡片 → sources 恒 0。
+  // 这种应答对下游（ai-daily discover）不可用——判定 usable=false，让上层走 Tavily/Firecrawl 托管降级。
+  const usable = Boolean(text.trim()) && sources.length > 0;
+
   return {
     text,
     sources,
+    usable,
     diagnostics: {
       ...usageDiagnostics(data),
       responses_web_search_calls: searched.webSearchCalls,
@@ -364,11 +371,18 @@ export async function searchGrokResponses(query, options, config) {
     error.diagnostics = parsed.diagnostics;
     throw error;
   }
+  if (!parsed.sources.length) {
+    const error = new Error("Grok Responses 返回文本但无可用 URL 卡片（代理 stateless 回显/搜索工具未实际执行）");
+    error.code = "GROK_RESPONSES_NO_SOURCES";
+    error.diagnostics = parsed.diagnostics;
+    throw error;
+  }
 
   return {
     model: options.model,
     content: parsed.text,
     sources: parsed.sources,
+    usable: true,
     endpoint: "responses",
     diagnostics: parsed.diagnostics,
     raw: data,

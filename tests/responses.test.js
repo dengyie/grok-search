@@ -230,6 +230,38 @@ assert.deepEqual(xParsed.diagnostics.responses_tool_calls, [
 const missing = parseGrokResponses({});
 assert.equal(missing.text, "");
 assert.equal(missing.sources.length, 0);
+assert.equal(missing.usable, false);
 assert.equal(missing.diagnostics.warnings.length >= 1, true);
+
+// 代理 stateless 回显（cpa.mangoqwq.com 实测形态）：HTTP 200 + output_text，
+// 但 annotations 全空、无 function_call/web_search_call/搜索结果 → sources 恒 0，usable=false。
+const statelessEcho = parseGrokResponses({
+  object: "response",
+  status: "completed",
+  error: null,
+  output: [
+    {
+      id: "msg_1",
+      type: "message",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          annotations: [],
+          logprobs: [],
+          text: "OpenAI latest news (as of my training) ...",
+        },
+      ],
+    },
+  ],
+});
+assert.equal(statelessEcho.sources.length, 0);
+assert.equal(statelessEcho.usable, false);
+assert.equal(statelessEcho.text.length > 0, true, "stateless echo still has text");
+assert.equal(
+  statelessEcho.diagnostics.warnings.some((w) => w.includes("No responses citations")),
+  false,
+  "warnings may not literally say this, just assert usable flag semantics"
+);
 
 console.log("responses fixtures ok");

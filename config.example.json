@@ -13,9 +13,23 @@
   "responsesOpenRouterEngine": "auto",
   "defaultExtra": 6,
   "sourceChars": 400,
+  "providerWeights": {
+    "tavily": 25,
+    "firecrawl": 25,
+    "fathom": 25,
+    "mcpTavily": 25
+  },
   "tavilyApiKey": "",
+  "tavilyApiKeys": [],
   "tavilyApiUrl": "https://api.tavily.com",
   "firecrawlApiKey": "",
   "firecrawlApiUrl": "https://api.firecrawl.dev/v2",
+  "fathomApiKey": "ft-YOUR_KEY_HERE",
+  "fathomApiUrl": "https://fathomsearch.xyz/mcp",
+  "fathomSearchTool": "mega_search",
+  "fathomEngines": "",
+  "mcpTavilyUrl": "https://search.604020.xyz/mcp",
+  "mcpTavilyToken": "",
+  "mcpTavilyTool": "search_proxy_tavily_search",
   "outputDir": ""
 }

@@ -142,7 +142,7 @@ await withServer(
     res.end("z".repeat(13_000));
   },
   async (_server, port) => {
-    const defaultFetch = await runNode(["scripts/fetch.js", "--provider", "direct", `http://127.0.0.1:${port}/long`]);
+    const defaultFetch = await runNode(["scripts/fetch.js", "--provider", "direct", "--full-path", `http://127.0.0.1:${port}/long`]);
     assert.equal(defaultFetch.code, 0);
     let output = parseJson(defaultFetch.stdout);
     assert.equal(output.content.chars, 12_000);
@@ -321,7 +321,7 @@ await withServer(
     const output = parseJson(searchResult.stdout);
     assert.equal(output.answer.text, "Parallel answer.");
     assert.equal(output.sources.extra.length, 6);
-    assert.deepEqual(output.diagnostics.options.extra_allocation, { tavily: 3, firecrawl: 3 });
+    assert.deepEqual(output.diagnostics.options.extra_allocation, { tavily: 3, firecrawl: 3, fathom: 0, mcpTavily: 0 });
     assert.equal(output.diagnostics.options.firecrawl_auth_mode, "keyless");
     assert.deepEqual(
       output.diagnostics.provider_attempts.map((attempt) => [attempt.provider, attempt.ok, attempt.count]),
@@ -354,7 +354,7 @@ await withServer(
     }));
     assert.equal(searchResult.code, 0);
     const output = parseJson(searchResult.stdout);
-    assert.deepEqual(output.diagnostics.options.extra_allocation, { tavily: 0, firecrawl: 4 });
+    assert.deepEqual(output.diagnostics.options.extra_allocation, { tavily: 0, firecrawl: 4, fathom: 0, mcpTavily: 0 });
     assert.equal(output.sources.extra.length, 1);
   }
 );
@@ -435,7 +435,7 @@ await withServer(
     const output = parseJson(searchResult.stdout);
     assert.equal(output.diagnostics.degraded, true);
     assert.equal(output.diagnostics.grok_error.code, "QUOTA_EXHAUSTED");
-    assert.match(output.answer.text, /Grok Responses 额度已耗尽/);
+    assert.match(output.answer.text, /Grok Responses 不可用/);
     assert.match(output.answer.text, /Fallback source/);
     assert.deepEqual(output.sources.grok, []);
     assert.equal(output.sources.extra.length, 1);
@@ -502,13 +502,63 @@ for (const [status, message] of [
       }));
       assert.equal(searchResult.code, 1);
       const output = parseJson(searchResult.stdout);
-      assertCommandErrorSchema(output, "searched_at", "SEARCH_ERROR");
+      assertCommandErrorSchema(output, "searched_at", "GROK_FAILED");
       assert.equal(output.diagnostics.degraded, undefined);
     }
   );
 }
 
 result = await runNode(["scripts/search.js", "--extra", "1", "--no-extra", "mock query"]);
+assert.equal(result.code, 2);
+assertCommandErrorSchema(parseJson(result.stdout), "searched_at", "ARGUMENT_ERROR");
+
+await withServer(
+  (req, res) => {
+    readJson(req, (body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      if (req.url === "/responses") {
+        res.end(JSON.stringify(responsesPayload()));
+        return;
+      }
+      assert.equal(req.url, "/tavily/search");
+      assert.equal(body.days, 2);
+      res.end(JSON.stringify({ results: [{ title: "Tavily recent", url: "https://tavily.example/recent" }] }));
+    });
+  },
+  async (_server, port) => {
+    const searchResult = await runNode(["scripts/search.js", "--extra", "1", "--days", "2", "mock query"], baseGrokEnv(port, {
+      TAVILY_API_KEY: "tavily-key",
+      TAVILY_API_URL: `http://127.0.0.1:${port}/tavily`,
+    }));
+    assert.equal(searchResult.code, 0);
+    const output = parseJson(searchResult.stdout);
+    assert.equal(output.answer.text, "Responses answer.");
+  }
+);
+
+await withServer(
+  (req, res) => {
+    readJson(req, (body) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      if (req.url === "/responses") {
+        res.end(JSON.stringify(responsesPayload()));
+        return;
+      }
+      assert.equal(req.url, "/tavily/search");
+      assert.equal(Object.hasOwn(body, "days"), false);
+      res.end(JSON.stringify({ results: [{ title: "Tavily default", url: "https://tavily.example/default" }] }));
+    });
+  },
+  async (_server, port) => {
+    const searchResult = await runNode(["scripts/search.js", "--extra", "1", "mock query"], baseGrokEnv(port, {
+      TAVILY_API_KEY: "tavily-key",
+      TAVILY_API_URL: `http://127.0.0.1:${port}/tavily`,
+    }));
+    assert.equal(searchResult.code, 0);
+  }
+);
+
+result = await runNode(["scripts/search.js", "--days", "0", "mock query"], baseGrokEnv(0));
 assert.equal(result.code, 2);
 assertCommandErrorSchema(parseJson(result.stdout), "searched_at", "ARGUMENT_ERROR");
 
