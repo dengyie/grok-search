@@ -15,8 +15,12 @@ Options:
   --full-path    Include full output file path in JSON (off by default)
 
 Environment:
-  TAVILY_API_KEY       Tavily key used by the primary provider
-  TAVILY_API_URL       Default: https://api.tavily.com
+  TAVILY_API_KEY       Official Tavily key used by the primary provider
+  TAVILY_API_URL       Official Tavily base URL; default: https://api.tavily.com
+  TAVILY_PROXY_URL     Optional third-party Tavily-compatible base URL; tried first
+  TAVILY_PROXY_KEY     Optional third-party Tavily key used with TAVILY_PROXY_URL
+  TAVILY_PROXY_TIMEOUT_MS
+                       Optional proxy fail-fast timeout in ms; default 12000, no retry
   FIRECRAWL_API_KEY    Optional Firecrawl key; keyless fallback works without it
   FIRECRAWL_API_URL    Default: https://api.firecrawl.dev/v2
   GROK_OUTPUT_DIR      Optional directory for full content when preview is truncated

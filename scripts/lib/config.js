@@ -10,10 +10,11 @@ export class ConfigError extends Error {
   }
 }
 
-const DEFAULT_MODEL = "grok-4.3";
+const DEFAULT_MODEL = "grok-4.6";
 const DEFAULT_EXTRA = 6;
 const DEFAULT_SOURCE_CHARS = 400;
 const DEFAULT_TAVILY_API_URL = "https://api.tavily.com";
+const DEFAULT_TAVILY_PROXY_TIMEOUT_MS = 12_000;
 const DEFAULT_FIRECRAWL_API_URL = "https://api.firecrawl.dev/v2";
 const DEFAULT_MCP_TAVILY_URL = "https://search.604020.xyz/mcp";
 const DEFAULT_OUTPUT_DIR = path.join(homedir(), ".cache", "grok-search", "outputs");
@@ -294,6 +295,15 @@ export async function loadConfig({ requireGrok = false } = {}) {
       DEFAULT_RESPONSES_OPENROUTER_ENGINE
     ),
     tavilyApiUrl: envOrFile("TAVILY_API_URL", fileConfig, ["TAVILY_API_URL", "tavilyApiUrl", "tavily_api_url"], DEFAULT_TAVILY_API_URL),
+    tavilyProxyUrl: envOrFile("TAVILY_PROXY_URL", fileConfig, ["TAVILY_PROXY_URL", "tavilyProxyUrl", "tavily_proxy_url"]),
+    tavilyProxyKey: envOrFile("TAVILY_PROXY_KEY", fileConfig, ["TAVILY_PROXY_KEY", "tavilyProxyKey", "tavily_proxy_key"]),
+    tavilyProxyTimeoutMs: envOrFileInt(
+      "TAVILY_PROXY_TIMEOUT_MS",
+      fileConfig,
+      ["TAVILY_PROXY_TIMEOUT_MS", "tavilyProxyTimeoutMs", "tavily_proxy_timeout_ms"],
+      DEFAULT_TAVILY_PROXY_TIMEOUT_MS,
+      { min: 1 }
+    ),
     // Multi-key: tavilyApiKeys[] (persistent RR). tavilyApiKey = first key for back-compat.
     ...((tavilyApiKeys) => ({
       tavilyApiKeys,

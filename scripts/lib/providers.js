@@ -9,6 +9,10 @@ const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const DIRECT_FETCH_MAX_BYTES = 2 * 1024 * 1024;
 const DIRECT_ERROR_PREVIEW_BYTES = 1000;
 const DEFAULT_TAVILY_RR_PATH = path.join(homedir(), ".cache", "grok-search", "tavily-rr.json");
+export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
+export const DEFAULT_TAVILY_PROXY_TIMEOUT_MS = 12_000;
+const TAVILY_SEARCH_TIMEOUT_MS = 90_000;
+const TAVILY_EXTRACT_TIMEOUT_MS = 60_000;
 const QUOTA_OR_KEY_MESSAGE =
   /insufficient[_-]?quota|quota[_-]?exhausted|credits?[_-]?exhausted|insufficient[_-]?credits?|payment[_-]?required|invalid.?api.?key|unauthorized|api.?key.*(invalid|expired|revoked)|额度|余额|计费/i;
 
@@ -33,7 +37,14 @@ export function allTavilyKeys(config) {
 
 function redactSecrets(text, config) {
   let out = String(text || "");
-  const secrets = [config?.grokApiKey, config?.firecrawlApiKey, config?.fathomApiKey, config?.mcpTavilyToken, ...allTavilyKeys(config)];
+  const secrets = [
+    config?.grokApiKey,
+    config?.firecrawlApiKey,
+    config?.fathomApiKey,
+    config?.mcpTavilyToken,
+    config?.tavilyProxyKey,
+    ...allTavilyKeys(config),
+  ];
   for (const secret of secrets) {
     if (typeof secret !== "string" || secret.length < 4) continue;
     out = out.split(secret).join("***");
@@ -74,8 +85,31 @@ export function saveTavilyRoundRobinIndex(nextIndex, config) {
   }
 }
 
+export function hasTavilyProxy(config) {
+  return Boolean(
+    typeof config?.tavilyProxyUrl === "string" &&
+      config.tavilyProxyUrl.trim() &&
+      typeof config?.tavilyProxyKey === "string" &&
+      config.tavilyProxyKey.trim()
+  );
+}
+
 export function hasTavilyApiKey(config) {
-  return allTavilyKeys(config).length > 0;
+  return hasTavilyProxy(config) || allTavilyKeys(config).length > 0;
+}
+
+function tavilyOfficialApiUrl(config) {
+  const url = typeof config?.tavilyApiUrl === "string" ? config.tavilyApiUrl.trim() : "";
+  return (url || "https://api.tavily.com").replace(/\/+$/, "");
+}
+
+function tavilyProxyTarget(config) {
+  if (!hasTavilyProxy(config)) return null;
+  return {
+    kind: "proxy",
+    apiUrl: config.tavilyProxyUrl.trim().replace(/\/+$/, ""),
+    apiKey: config.tavilyProxyKey.trim(),
+  };
 }
 
 export function hasFathomApiKey(config) {
@@ -124,33 +158,91 @@ function shouldRetryHttpError(error) {
   return RETRYABLE_STATUS.has(error.status);
 }
 
+function tavilyTargetMeta(backend, index, keyTotal, tried, extra = {}) {
+  return {
+    tavily_backend: backend,
+    tavily_key_index: index,
+    tavily_key_total: keyTotal,
+    tavily_keys_tried: tried,
+    ...(extra.tavily_proxy_tried ? { tavily_proxy_tried: true } : {}),
+    ...(extra.tavily_proxy_error ? { tavily_proxy_error: extra.tavily_proxy_error } : {}),
+  };
+}
+
+export function tavilyProxyTimeoutMs(config) {
+  const n = config?.tavilyProxyTimeoutMs;
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_TAVILY_PROXY_TIMEOUT_MS;
+}
+
+function tavilyRequestOptions(config, target, officialTimeoutMs) {
+  const proxy = target?.backend === "proxy";
+  return {
+    timeoutMs: proxy ? tavilyProxyTimeoutMs(config) : officialTimeoutMs,
+    config,
+    retry: !proxy,
+  };
+}
+
 /**
- * Run fn(apiKey) starting at persistent RR index; on quota/auth failure try remaining keys once each.
+ * Run fn(apiKey, index, total, target). Prefer a configured third-party Tavily
+ * proxy; if that request fails, fall back to official keys. Official keys still
+ * start at the persistent RR index and rotate on quota/auth failure.
  */
 export async function withTavilyApiKey(config, fn) {
   const keys = allTavilyKeys(config);
-  if (!keys.length) {
+  const proxy = tavilyProxyTarget(config);
+  if (!proxy && !keys.length) {
     return { skipped: true, error: "TAVILY_API_KEY 未配置" };
+  }
+
+  let lastError = "Tavily request failed";
+  let tried = 0;
+  let proxyError;
+  const proxyTried = Boolean(proxy);
+  const proxyMeta = () => ({
+    ...(proxyTried ? { tavily_proxy_tried: true } : {}),
+    ...(proxyError ? { tavily_proxy_error: proxyError } : {}),
+  });
+
+  if (proxy) {
+    tried += 1;
+    try {
+      const result = await fn(proxy.apiKey, -1, keys.length, {
+        apiUrl: proxy.apiUrl,
+        backend: "proxy",
+      });
+      if (result?.ok) {
+        return { ...result, ...tavilyTargetMeta("proxy", -1, keys.length, tried, proxyMeta()) };
+      }
+      lastError = String(result?.error || lastError);
+      proxyError = redactSecrets(lastError, config);
+      debugLog(config, `tavily proxy failed, fall back to official: ${lastError}`);
+    } catch (error) {
+      lastError = error?.message || String(error);
+      proxyError = redactSecrets(lastError, config);
+      debugLog(config, `tavily proxy error, fall back to official: ${lastError}`);
+    }
+  }
+
+  if (!keys.length) {
+    return { ok: false, error: lastError, ...tavilyTargetMeta("proxy", -1, 0, tried, proxyMeta()) };
   }
 
   const claimed = nextTavilyApiKey(config);
   const start = claimed?.index ?? 0;
+  const officialUrl = tavilyOfficialApiUrl(config);
 
-  let lastError = "Tavily request failed";
-  let tried = 0;
   for (let offset = 0; offset < keys.length; offset += 1) {
     const index = (start + offset) % keys.length;
     const apiKey = keys[index];
     tried += 1;
     try {
-      const result = await fn(apiKey, index, keys.length);
+      const result = await fn(apiKey, index, keys.length, {
+        apiUrl: officialUrl,
+        backend: "official",
+      });
       if (result?.ok) {
-        return {
-          ...result,
-          tavily_key_index: index,
-          tavily_key_total: keys.length,
-          tavily_keys_tried: tried,
-        };
+        return { ...result, ...tavilyTargetMeta("official", index, keys.length, tried, proxyMeta()) };
       }
       const softError = {
         status: parseHttpStatusFromMessage(result?.error),
@@ -161,33 +253,21 @@ export async function withTavilyApiKey(config, fn) {
         debugLog(config, `tavily key#${index} soft-fail, try next: ${lastError}`);
         continue;
       }
-      return {
-        ...result,
-        tavily_key_index: index,
-        tavily_key_total: keys.length,
-        tavily_keys_tried: tried,
-      };
+      return { ...result, ...tavilyTargetMeta("official", index, keys.length, tried, proxyMeta()) };
     } catch (error) {
       lastError = error?.message || String(error);
       if (offset < keys.length - 1 && isTavilyKeyExhaustedError(error)) {
         debugLog(config, `tavily key#${index} exhausted/auth, try next: ${lastError}`);
         continue;
       }
-      return {
-        ok: false,
-        error: lastError,
-        tavily_key_index: index,
-        tavily_key_total: keys.length,
-        tavily_keys_tried: tried,
-      };
+      return { ok: false, error: lastError, ...tavilyTargetMeta("official", index, keys.length, tried, proxyMeta()) };
     }
   }
 
   return {
     ok: false,
     error: lastError,
-    tavily_key_total: keys.length,
-    tavily_keys_tried: tried,
+    ...tavilyTargetMeta(proxy ? "proxy+official" : "official", undefined, keys.length, tried, proxyMeta()),
   };
 }
 
@@ -204,8 +284,8 @@ export function retryAfterMs(headers) {
 }
 
 export function backoffMs(config, attemptIndex) {
-  const maxWaitMs = (Number.isFinite(config.retryMaxWait) ? config.retryMaxWait : 10) * 1000;
-  const multiplier = Number.isFinite(config.retryMultiplier) ? config.retryMultiplier : 1;
+  const maxWaitMs = (Number.isFinite(config?.retryMaxWait) ? config.retryMaxWait : 10) * 1000;
+  const multiplier = Number.isFinite(config?.retryMultiplier) ? config.retryMultiplier : 1;
   const computed = multiplier * 1000 * 2 ** attemptIndex;
   return Math.min(maxWaitMs, Math.max(0, computed));
 }
@@ -213,8 +293,6 @@ export function backoffMs(config, attemptIndex) {
 export function debugLog(config, message) {
   if (config?.debug) console.error(`[grok-search] ${message}`);
 }
-
-export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
 
 export function retryMaxAttempts(config) {
   const n = config?.retryMaxAttempts;
@@ -297,14 +375,12 @@ export async function tavilyExtract(url, config) {
     return { ok: false, provider: "tavily", skipped: true, error: "TAVILY_API_KEY 未配置" };
   }
 
-  const endpoint = `${config.tavilyApiUrl.replace(/\/+$/, "")}/extract`;
-  const outcome = await withTavilyApiKey(config, async (apiKey) => {
+  const outcome = await withTavilyApiKey(config, async (apiKey, _index, _total, target) => {
+    const endpoint = `${(target?.apiUrl || tavilyOfficialApiUrl(config)).replace(/\/+$/, "")}/extract`;
     const data = await requestJson(endpoint, {
       headers: authHeaders(apiKey),
       body: { urls: [url], format: "markdown" },
-      timeoutMs: 60_000,
-      config,
-      retry: true,
+      ...tavilyRequestOptions(config, target, TAVILY_EXTRACT_TIMEOUT_MS),
     });
 
     const result = Array.isArray(data?.results) ? data.results[0] : undefined;
@@ -406,8 +482,8 @@ export async function tavilySearch(query, limit, config, days = null) {
     return { ok: false, provider: "tavily", skipped: true, error: "TAVILY_API_KEY 未配置", sources: [] };
   }
 
-  const endpoint = `${config.tavilyApiUrl.replace(/\/+$/, "")}/search`;
-  const outcome = await withTavilyApiKey(config, async (apiKey) => {
+  const outcome = await withTavilyApiKey(config, async (apiKey, _index, _total, target) => {
+    const endpoint = `${(target?.apiUrl || tavilyOfficialApiUrl(config)).replace(/\/+$/, "")}/search`;
     const body = {
       query,
       max_results: limit,
@@ -423,11 +499,12 @@ export async function tavilySearch(query, limit, config, days = null) {
     const data = await requestJson(endpoint, {
       headers: authHeaders(apiKey),
       body,
-      timeoutMs: 90_000,
-      config,
-      retry: true,
+      ...tavilyRequestOptions(config, target, TAVILY_SEARCH_TIMEOUT_MS),
     });
     const sources = (Array.isArray(data?.results) ? data.results : []).map((result) => sourceFromTavily(result)).filter(Boolean);
+    if (!sources.length && target?.backend === "proxy") {
+      return { ok: false, provider: "tavily", error: "Tavily proxy 返回空结果", sources, raw: data };
+    }
     return { ok: true, provider: "tavily", sources, raw: data };
   });
 
@@ -667,7 +744,6 @@ export async function tavilyMap(url, options, config) {
     return { ok: false, provider: "tavily", skipped: true, error: "TAVILY_API_KEY 未配置", results: [] };
   }
 
-  const endpoint = `${config.tavilyApiUrl.replace(/\/+$/, "")}/map`;
   const body = {
     url,
     max_depth: options.maxDepth,
@@ -677,13 +753,12 @@ export async function tavilyMap(url, options, config) {
   };
   if (options.instructions) body.instructions = options.instructions;
 
-  const outcome = await withTavilyApiKey(config, async (apiKey) => {
+  const outcome = await withTavilyApiKey(config, async (apiKey, _index, _total, target) => {
+    const endpoint = `${(target?.apiUrl || tavilyOfficialApiUrl(config)).replace(/\/+$/, "")}/map`;
     const data = await requestJson(endpoint, {
       headers: authHeaders(apiKey),
       body,
-      timeoutMs: (options.timeout + 10) * 1000,
-      config,
-      retry: true,
+      ...tavilyRequestOptions(config, target, (options.timeout + 10) * 1000),
     });
     return {
       ok: true,
@@ -881,7 +956,15 @@ export async function mapUrl(url, config, { provider = "auto", ...options } = {}
 
   if (provider === "auto" || provider === "tavily") {
     const result = await tavilyMap(url, options, config);
-    tried.push({ provider: result.provider, ok: result.ok, skipped: Boolean(result.skipped), error: result.error });
+    tried.push({
+      provider: result.provider,
+      ok: result.ok,
+      skipped: Boolean(result.skipped),
+      error: result.error,
+      ...(result.tavily_backend ? { tavily_backend: result.tavily_backend } : {}),
+      ...(result.tavily_proxy_tried ? { tavily_proxy_tried: true } : {}),
+      ...(result.tavily_proxy_error ? { tavily_proxy_error: result.tavily_proxy_error } : {}),
+    });
     if (result.ok || provider === "tavily") return { ...result, tried };
   }
 
@@ -1168,7 +1251,15 @@ export async function fetchUrl(url, config, { provider = "auto" } = {}) {
 
   if (provider === "auto" || provider === "tavily") {
     const result = await tavilyExtract(url, config);
-    tried.push({ provider: result.provider, ok: result.ok, skipped: Boolean(result.skipped), error: result.error });
+    tried.push({
+      provider: result.provider,
+      ok: result.ok,
+      skipped: Boolean(result.skipped),
+      error: result.error,
+      ...(result.tavily_backend ? { tavily_backend: result.tavily_backend } : {}),
+      ...(result.tavily_proxy_tried ? { tavily_proxy_tried: true } : {}),
+      ...(result.tavily_proxy_error ? { tavily_proxy_error: result.tavily_proxy_error } : {}),
+    });
     if (result.ok || provider === "tavily") return { ...result, tried };
   }
 

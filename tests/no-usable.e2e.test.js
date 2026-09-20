@@ -6,7 +6,7 @@
 // from the proxy layer). search.js must then NOT throw; instead it must:
 //   - set degraded:true, grok_error.code = GROK_NO_USABLE
 //   - report status "degraded_success" when extra providers contributed sources,
-//     "total_failure" when they did not.
+//     "degraded" when they did not (--no-extra / no usable extra sources).
 //
 // The real publicResult() from scripts/search.js is imported and driven through a
 // local in-process mock HTTP server via a hand-built hermetic config (no real
@@ -100,15 +100,15 @@ async function main() {
     }, "case 1 should not reject");
     console.log("✓ noUsable + Tavily → degraded_success (degraded, GROK_NO_USABLE, extra preserved)");
 
-    // Case 2: noUsable + --no-extra (extra disabled) → total_failure, but still degrades.
+    // Case 2: noUsable + --no-extra (extra disabled) → degraded, still no throw.
     await assert.doesNotReject(async () => {
       const res = await publicResult({ query: "state of AI", extra: 0, extraMode: "off" }, config);
-      assert.equal(res.diagnostics.status, "total_failure", `case2 expected total_failure, got ${res.diagnostics.status}`);
+      assert.equal(res.diagnostics.status, "degraded", `case2 expected degraded, got ${res.diagnostics.status}`);
       assert.equal(res.diagnostics.degraded, true, "case2 should be degraded");
       assert.equal(res.diagnostics.grok_error?.code, "GROK_NO_USABLE", `case2 grok_error.code: ${JSON.stringify(res.diagnostics.grok_error)}`);
       assert.equal(res.sources.extra.length, 0, "case2 extras should be empty");
     }, "case 2 should not reject");
-    console.log("✓ noUsable + --no-extra → total_failure (degraded, no throw)");
+    console.log("✓ noUsable + --no-extra → degraded (no throw)");
 
     console.log("\n✅ All no-usable e2e tests passed");
   } catch (err) {

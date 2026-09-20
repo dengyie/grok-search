@@ -18,8 +18,12 @@ function usage() {
 Discover same-site URLs with Tavily Map or a lightweight Direct Map fallback.
 
 Environment:
-  TAVILY_API_KEY       Optional Tavily Map key
-  TAVILY_API_URL       Default: https://api.tavily.com
+  TAVILY_API_KEY       Optional official Tavily Map key
+  TAVILY_API_URL       Official Tavily base URL; default: https://api.tavily.com
+  TAVILY_PROXY_URL     Optional third-party Tavily-compatible base URL; tried first
+  TAVILY_PROXY_KEY     Optional third-party Tavily key used with TAVILY_PROXY_URL
+  TAVILY_PROXY_TIMEOUT_MS
+                       Optional proxy fail-fast timeout in ms; default 12000, no retry
 `;
 }
 

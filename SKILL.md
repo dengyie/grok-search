@@ -32,6 +32,7 @@ Do not chain map → fetch → search by default. Run the fewest commands that a
 ```bash
 ./scripts/fetch.js https://example.com
 ./scripts/fetch.js --provider direct https://example.com
+./scripts/fetch.js --full-path https://example.com
 ```
 
 Use `./scripts/fetch.js --max-chars 50000 URL` only for an explicit deep read after the preview shows the page is worth reading.
@@ -42,7 +43,7 @@ Use `./scripts/fetch.js --max-chars 50000 URL` only for an explicit deep read af
 ./scripts/map.js https://docs.example.com --instructions "only API reference pages" --max-depth 2
 ```
 
-Search is Responses-only. It runs Grok Responses alongside independent Tavily and Firecrawl searches. Tavily is used when its key is configured; Firecrawl works keyless and automatically uses `FIRECRAWL_API_KEY` when available. The default combined extra target is 6. Add `--extra 10` only for a broader candidate-source sweep. Extras are never fed into Grok.
+Search is Responses-only. It runs Grok Responses alongside independent Tavily and Firecrawl searches. Tavily is used when a third-party proxy (`TAVILY_PROXY_URL` + `TAVILY_PROXY_KEY`) or an official key is configured. The proxy is tried first and fail-fasts (12s, no retry; empty search results count as failure); if that request fails, official `TAVILY_API_KEY` / `tavilyApiKeys` are used. Firecrawl works keyless and automatically uses `FIRECRAWL_API_KEY` when available. The default combined extra target is 6. Add `--extra 10` only for a broader candidate-source sweep. Extras are never fed into Grok.
 
 If Grok quota is explicitly exhausted, `search.js` may return a visibly marked degraded answer made from raw Tavily/Firecrawl results. Check `diagnostics.degraded` and `diagnostics.grok_error`. Other Grok failures remain errors. `--no-extra` disables this fallback as well as the external searches.
 
@@ -56,7 +57,7 @@ Check in this order:
 - `diagnostics.warnings` and `diagnostics.provider_attempts` — these tell you which providers were skipped, failed, or produced content.
 - Search success: read `answer.text`, then `sources.merged`. Source cards are short and use `snippet`, not `description` or `content`. Full source/provider raw is in `sources.raw_path`; read it in chunks only when needed.
 - Search: inspect `diagnostics.grok_endpoint`, `diagnostics.degraded`, `diagnostics.cost_usd`, provider attempts, and `sources.grok[].source_type` (`citation` vs `searched`) before treating sources as evidence.
-- Fetch success: read `content.text`. If `content.truncated` is true and the preview is enough, stop. If more is needed, read `content.full_path` in chunks or rerun once with a deliberate larger `--max-chars`.
+- Fetch success: read `content.text`. If `content.truncated` is true and the preview is enough, stop. If more is needed, rerun once with a deliberate larger `--max-chars`; use `--full-path` only when a local path to the complete output is specifically needed.
 - Map success: read `urls`, choose the best candidates, then fetch only the few URLs you need.
 
 Search and fetch are intentionally separated. Use search to discover and compare sources, then fetch a specific URL for deep reading. In one research turn, fetch 1-2 URLs by default; do not batch-fetch many pages unless the user explicitly asks.
