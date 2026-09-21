@@ -760,11 +760,15 @@ export async function tavilyMap(url, options, config) {
       body,
       ...tavilyRequestOptions(config, target, (options.timeout + 10) * 1000),
     });
+    const results = Array.isArray(data?.results) ? data.results.filter((item) => typeof item === "string") : [];
+    if (!results.length && target?.backend === "proxy") {
+      return { ok: false, provider: "tavily", error: "Tavily proxy 返回空结果", results, raw: data };
+    }
     return {
       ok: true,
       provider: "tavily",
       base_url: data?.base_url || new URL(url).origin,
-      results: Array.isArray(data?.results) ? data.results.filter((item) => typeof item === "string") : [],
+      results,
       response_time: data?.response_time ?? null,
       raw: data,
     };

@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { tavilySearch } from "../scripts/lib/providers.js";
+import { tavilyMap, tavilySearch } from "../scripts/lib/providers.js";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -38,6 +38,10 @@ async function main() {
               results: [{ url: "https://example.com/official", title: "Official", content: "ok" }],
             })
           );
+          return;
+        }
+        if (req.url?.includes("/map")) {
+          res.end(JSON.stringify({ results: ["https://example.com/official"] }));
           return;
         }
         res.end(JSON.stringify({ results: [] }));
@@ -93,6 +97,24 @@ async function main() {
       assert.equal(officialEmpty.ok, true, "official empty sources stay ok:true");
       assert.equal(officialEmpty.tavily_backend, "official");
       assert.deepEqual(officialEmpty.sources, []);
+
+      const emptyMap = await tavilyMap(
+        "https://example.com",
+        { maxDepth: 1, maxBreadth: 20, limit: 10, timeout: 30 },
+        {
+          tavilyProxyUrl: origin(emptyProxy),
+          tavilyProxyKey: "th-proxy",
+          tavilyProxyTimeoutMs: 2000,
+          tavilyApiUrl: officialUrl,
+          tavilyApiKeys: ["tvly-official"],
+          tavilyRoundRobinPath: path.join(dir, "empty-map-rr.json"),
+        }
+      );
+      assert.equal(emptyMap.ok, true, `empty proxy map should fall back: ${emptyMap.error}`);
+      assert.equal(emptyMap.tavily_backend, "official");
+      assert.equal(emptyMap.tavily_proxy_tried, true);
+      assert.match(String(emptyMap.tavily_proxy_error), /空结果/);
+      assert.deepEqual(emptyMap.results, ["https://example.com/official"]);
     } finally {
       emptyProxy.close();
     }
