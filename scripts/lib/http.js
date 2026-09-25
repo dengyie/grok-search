@@ -5,6 +5,9 @@ import { configureProxyFromEnv } from "./proxy.js";
 configureProxyFromEnv();
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_MULTIPLIER = 1;
+const DEFAULT_RETRY_MAX_WAIT = 10;
 
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,7 +62,14 @@ export function upstreamMessage(body) {
 
 export function redactSecrets(text, config) {
   let out = String(text || "");
-  for (const secret of [config?.grokApiKey, config?.tavilyApiKey, config?.firecrawlApiKey]) {
+  const secrets = [
+    config?.grokApiKey,
+    config?.firecrawlApiKey,
+    config?.tavilyProxyKey,
+    ...(Array.isArray(config?.tavilyApiKeys) ? config.tavilyApiKeys : []),
+    config?.tavilyApiKey,
+  ];
+  for (const secret of secrets) {
     if (typeof secret !== "string" || secret.length < 4) continue;
     out = out.split(secret).join("***");
   }
@@ -78,10 +88,16 @@ export function retryAfterMs(headers) {
   return null;
 }
 
+export function retryMaxAttempts(config) {
+  const n = config?.retryMaxAttempts;
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_RETRY_MAX_ATTEMPTS;
+}
+
 export function backoffMs(config, attemptIndex) {
-  const maxWaitMs = config.retryMaxWait * 1000;
-  const computed = config.retryMultiplier * 1000 * 2 ** attemptIndex;
-  return Math.min(maxWaitMs, computed);
+  const maxWait = Number.isFinite(config?.retryMaxWait) ? config.retryMaxWait : DEFAULT_RETRY_MAX_WAIT;
+  const multiplier = Number.isFinite(config?.retryMultiplier) ? config.retryMultiplier : DEFAULT_RETRY_MULTIPLIER;
+  const computed = multiplier * 1000 * 2 ** attemptIndex;
+  return Math.min(maxWait * 1000, Math.max(0, computed));
 }
 
 export function debugLog(config, message) {
@@ -95,8 +111,8 @@ export function debugLog(config, message) {
  * callers can report real request counts instead of configured maximums.
  */
 export async function requestJson(url, { headers, body, timeoutMs, config, retry = false, retryOnTimeout = true, stats = null }) {
-  const maxAttempts = retry ? config.retryMaxAttempts : 1;
-  const waitBudgetMs = config.retryMaxWait * 1000;
+  const maxAttempts = retry ? retryMaxAttempts(config) : 1;
+  const waitBudgetMs = (Number.isFinite(config?.retryMaxWait) ? config.retryMaxWait : DEFAULT_RETRY_MAX_WAIT) * 1000;
   let lastError;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {

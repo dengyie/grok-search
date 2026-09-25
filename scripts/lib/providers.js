@@ -10,8 +10,23 @@ import { firecrawlAuthMode, firecrawlScrape } from "./firecrawl.js";
 import { parseXPostUrl } from "./sources.js";
 import { tavilyExtract, tavilyMap } from "./tavily.js";
 
-export { authHeaders, backoffMs, debugLog, redactSecrets, requestJson, retryAfterMs, upstreamMessage } from "./http.js";
-export { tavilyExtract, tavilyMap, tavilySearch } from "./tavily.js";
+export { authHeaders, backoffMs, debugLog, redactSecrets, requestJson, retryAfterMs, retryMaxAttempts, upstreamMessage } from "./http.js";
+export {
+  allTavilyKeys,
+  hasTavilyApiKey,
+  hasTavilyProxy,
+  isTavilyKeyExhaustedError,
+  loadTavilyRoundRobinIndex,
+  nextTavilyApiKey,
+  saveTavilyRoundRobinIndex,
+  sourceFromTavily,
+  tavilyExtract,
+  tavilyMap,
+  tavilyProxyTimeoutMs,
+  tavilyRoundRobinPath,
+  tavilySearch,
+  withTavilyApiKey,
+} from "./tavily.js";
 export { firecrawlAuthMode, firecrawlMetadata, firecrawlScrape, firecrawlSearch, isFirecrawlQuotaError } from "./firecrawl.js";
 export {
   DIRECT_MAP_REQUEST_TIMEOUT_SECONDS,
@@ -31,6 +46,19 @@ function summarizeMapFailure(tried, fallback) {
   return details ? `映射失败: ${details}` : fallback || "映射失败";
 }
 
+function attemptFromResult(result) {
+  return {
+    provider: result.provider,
+    ok: result.ok,
+    skipped: Boolean(result.skipped),
+    error: result.error,
+    ...(result.tavily_backend ? { tavily_backend: result.tavily_backend } : {}),
+    ...(Number.isFinite(result.tavily_key_index) ? { tavily_key_index: result.tavily_key_index } : {}),
+    ...(result.tavily_proxy_tried ? { tavily_proxy_tried: true } : {}),
+    ...(result.tavily_proxy_error ? { tavily_proxy_error: result.tavily_proxy_error } : {}),
+  };
+}
+
 export async function mapUrl(url, config, { provider = "auto", ...options } = {}) {
   const tried = [];
 
@@ -42,7 +70,7 @@ export async function mapUrl(url, config, { provider = "auto", ...options } = {}
 
   if (provider === "auto" || provider === "tavily") {
     const result = await tavilyMap(url, options, config);
-    tried.push({ provider: result.provider, ok: result.ok, skipped: Boolean(result.skipped), error: result.error });
+    tried.push(attemptFromResult(result));
     if (result.ok || provider === "tavily") return { ...result, tried };
   }
 
@@ -103,7 +131,7 @@ export async function fetchUrl(url, config, { provider = "auto" } = {}) {
 
   if (provider === "auto" || provider === "tavily") {
     const result = await tavilyExtract(url, config);
-    tried.push({ provider: result.provider, ok: result.ok, skipped: Boolean(result.skipped), error: result.error });
+    tried.push(attemptFromResult(result));
     if (result.ok || provider === "tavily") return { ...result, tried };
   }
 

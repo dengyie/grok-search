@@ -382,13 +382,18 @@ function providerAttempt(result) {
     ...(Number.isFinite(result.requests) ? { requests: result.requests } : {}),
     ...(Number.isFinite(result.duration_ms) ? { duration_ms: result.duration_ms } : {}),
     ...(result.quota_exhausted ? { quota_exhausted: true } : {}),
+    ...(result.tavily_backend ? { tavily_backend: result.tavily_backend } : {}),
+    ...(Number.isFinite(result.tavily_key_index) ? { tavily_key_index: result.tavily_key_index } : {}),
+    ...(result.tavily_proxy_tried ? { tavily_proxy_tried: true } : {}),
+    ...(result.tavily_proxy_error ? { tavily_proxy_error: result.tavily_proxy_error } : {}),
     ...(result.error ? { error: result.error } : {}),
   };
 }
 
 function extraAllocation(limit, config, { firecrawlAvailable = true } = {}) {
   if (limit <= 0) return { tavily: 0, firecrawl: 0 };
-  if (!config.tavilyApiKey) return { tavily: 0, firecrawl: firecrawlAvailable ? limit : 0 };
+  const tavilyAvailable = Boolean(config.tavilyApiKey) || (Array.isArray(config.tavilyApiKeys) && config.tavilyApiKeys.length > 0) || Boolean(config.tavilyProxyKey && config.tavilyProxyUrl);
+  if (!tavilyAvailable) return { tavily: 0, firecrawl: firecrawlAvailable ? limit : 0 };
   if (!firecrawlAvailable) return { tavily: limit, firecrawl: 0 };
   const tavily = Math.ceil(limit / 2);
   return { tavily, firecrawl: limit - tavily };

@@ -83,7 +83,11 @@ chmod 600 ~/.config/grok-search/config.json
   "defaultExtra": 6,
   "sourceChars": 400,
   "tavilyApiKey": "",
+  "tavilyApiKeys": [],
   "tavilyApiUrl": "https://api.tavily.com",
+  "tavilyProxyUrl": "",
+  "tavilyProxyKey": "",
+  "tavilyProxyTimeoutMs": 12000,
   "firecrawlApiKey": "",
   "firecrawlApiUrl": "https://api.firecrawl.dev/v2",
   "outputDir": "",
@@ -106,7 +110,7 @@ chmod 600 ~/.config/grok-search/config.json
 - 旧配置项 `responsesIncludeXSearch` / `GROK_RESPONSES_INCLUDE_X_SEARCH` 已移除（2026-08 弃用，2026-09 删除）。值为 `true` 时命令直接报 `CONFIG_OPTION_REMOVED` 而不是静默丢掉 X 检索，请改为 `searchSource: "both"`；`false` 或缺失不受影响。
 - 优先级为 命令行 > 环境变量 > 配置文件 > 默认值。注意配置文件由你书写、命令行参数由调用本工具的 agent 书写：标量配置（如 `searchSource`）是**默认值**，agent 可以覆盖，实际生效值见 `diagnostics.options`；但配置里的**限制**不会被静默抹掉——allow-list 与 deny-list 都是限制，命令行只能收紧不能放宽。越界报 `RESPONSES_FILTER_FORBIDDEN`，把 allow-list 减空报 `RESPONSES_FILTER_EMPTY`，两个 deny-list 合并而非替换。规则见 [docs/responses-mode.md](docs/responses-mode.md#配置与命令行的优先级)。
 - `responsesOpenRouterEngine` 可选 `auto`、`native`、`exa`、`firecrawl`、`parallel` 或 `perplexity`，仅在 `apiProvider` 为 `openrouter` 时生效。
-- `tavilyApiKey` 可留空；`firecrawlApiKey` 也可留空并使用 Firecrawl Keyless。`outputDir` 留空时使用默认目录 `~/.cache/grok-search/outputs/`；`stateDir` 留空时使用 `~/.cache/grok-search/`，存放 Firecrawl 冷却状态；`runLog: false` 关闭每次调用的运行记录落盘。
+- `tavilyApiKey` 可留空；多把官方 key 写进 `tavilyApiKeys`（或环境变量 `TAVILY_API_KEYS`，逗号分隔），配额或鉴权失败时才轮到下一把，游标在 `~/.cache/grok-search/tavily-rr.json`。`tavilyProxyUrl` + `tavilyProxyKey` 是另一套第三方兼容入口：先打代理（默认 12 秒、不重试），HTTP 失败或 search/map 空结果再回落官方 key。不要把代理 URL 写进 `tavilyApiUrl`，两边的 key 不通用。`firecrawlApiKey` 也可留空并使用 Firecrawl Keyless。`outputDir` 留空时使用默认目录 `~/.cache/grok-search/outputs/`；`stateDir` 留空时使用 `~/.cache/grok-search/`，存放 Firecrawl 冷却状态；`runLog: false` 关闭每次调用的运行记录落盘。
 
 如果使用 OpenRouter，核心字段可改为：
 
@@ -171,7 +175,11 @@ Node 原生 `fetch` 默认不会可靠读取终端代理变量。本项目会在
 | `GROK_MAX_SOURCES` | `maxSources` | 否 | `search.js` | stdout 返回的 source card 数量上限。默认 `12`；被裁剪的完整列表落盘到 `sources.raw_path`。 |
 | `GROK_DEADLINE_SECONDS` | `deadlineSeconds` | 否 | 所有脚本 | 单条命令总耗时上限（秒）。默认 `240`，`0` 表示禁用；超时会先输出 `DEADLINE_EXCEEDED` JSON 再退出。 |
 | `TAVILY_API_KEY` | `tavilyApiKey` | 否 | `search.js`、`fetch.js`、`map.js` | 启用 Tavily Search / Extract / Map。没有它时，search/fetch 仍可使用 Firecrawl Keyless，map 使用 Direct Map。 |
-| `TAVILY_API_URL` | `tavilyApiUrl` | 否 | Tavily 路径 | 默认 `https://api.tavily.com`。 |
+| `TAVILY_API_KEYS` | `tavilyApiKeys` | 否 | Tavily 路径 | 逗号分隔的官方 key 池。配额或鉴权失败才轮换；游标 `~/.cache/grok-search/tavily-rr.json`。环境变量优先于配置文件。 |
+| `TAVILY_API_URL` | `tavilyApiUrl` | 否 | Tavily 路径 | 官方 base，默认 `https://api.tavily.com`。不要改成第三方代理地址。 |
+| `TAVILY_PROXY_URL` | `tavilyProxyUrl` | 否 | Tavily 路径 | 第三方兼容 base，去掉尾斜杠。与官方 key 分开配置。 |
+| `TAVILY_PROXY_KEY` | `tavilyProxyKey` | 否 | Tavily 路径 | 代理 Bearer token。配齐 URL 和 key 后优先打代理。 |
+| `TAVILY_PROXY_TIMEOUT_MS` | `tavilyProxyTimeoutMs` | 否 | Tavily 路径 | 代理 fail-fast 超时，默认 `12000`，不重试。search/map 空结果也回落官方；extract 空内容不回落。 |
 | `FIRECRAWL_API_KEY` | `firecrawlApiKey` | 否 | `search.js`、`fetch.js` | 可选。未配置时使用 Firecrawl Keyless；配置后使用独立账户额度和更高限流。 |
 | `FIRECRAWL_API_URL` | `firecrawlApiUrl` | 否 | Firecrawl 路径 | 默认 `https://api.firecrawl.dev/v2`。 |
 | `GROK_OUTPUT_DIR` | `outputDir` | 否 | 所有脚本 | 覆盖长输出与运行记录的落盘目录。默认 `~/.cache/grok-search/outputs/`。 |

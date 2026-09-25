@@ -1,5 +1,5 @@
 import { recordFirecrawlCooldown } from "./cooldown.js";
-import { authHeaders, backoffMs, debugLog, isPlainObject, requestJson, sleep, upstreamMessage } from "./http.js";
+import { authHeaders, backoffMs, debugLog, isPlainObject, requestJson, retryMaxAttempts, sleep, upstreamMessage } from "./http.js";
 import { domainFilters } from "./sources.js";
 
 export function firecrawlAuthMode(config) {
@@ -76,7 +76,8 @@ export async function firecrawlScrape(url, config, { timeoutMs = 90_000 } = {}) 
     ...extra,
   });
 
-  for (let attempt = 0; attempt < config.retryMaxAttempts; attempt += 1) {
+  const maxAttempts = retryMaxAttempts(config);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let data;
     try {
       data = await requestJson(endpoint, {
@@ -123,8 +124,8 @@ export async function firecrawlScrape(url, config, { timeoutMs = 90_000 } = {}) 
       };
     }
 
-    debugLog(config, `Firecrawl empty markdown, retry ${attempt + 1}/${config.retryMaxAttempts}`);
-    if (attempt < config.retryMaxAttempts - 1) await sleep(backoffMs(config, attempt));
+    debugLog(config, `Firecrawl empty markdown, retry ${attempt + 1}/${maxAttempts}`);
+    if (attempt < maxAttempts - 1) await sleep(backoffMs(config, attempt));
   }
 
   return fail("Firecrawl Scrape 返回空内容");

@@ -132,6 +132,42 @@ function envOrFileList(envName, fileConfig, keys, fallback = []) {
   return configValue == null ? fallback : parseListValue(configValue);
 }
 
+function dedupeStrings(items) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const value = String(item || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+/**
+ * Collect official Tavily keys.
+ * Priority: TAVILY_API_KEYS env → TAVILY_API_KEY env → merge file tavilyApiKeys + tavilyApiKey.
+ * Empty tavilyApiKeys: [] does NOT suppress a valid tavilyApiKey.
+ * Proxy credentials are a different field and never land in this list.
+ */
+export function resolveTavilyApiKeys(fileConfig, getEnv = env) {
+  const fromEnvMulti = getEnv("TAVILY_API_KEYS");
+  if (fromEnvMulti != null && String(fromEnvMulti).trim() !== "") {
+    return dedupeStrings(parseListValue(fromEnvMulti));
+  }
+
+  const fromEnvSingle = getEnv("TAVILY_API_KEY");
+  if (fromEnvSingle != null && String(fromEnvSingle).trim() !== "") {
+    return dedupeStrings(parseListValue(fromEnvSingle));
+  }
+
+  const multiRaw = fileValue(fileConfig, ["TAVILY_API_KEYS", "tavilyApiKeys", "tavily_api_keys"]);
+  const singleRaw = fileValue(fileConfig, ["TAVILY_API_KEY", "tavilyApiKey", "tavily_api_key"]);
+  const multi = multiRaw == null ? [] : dedupeStrings(parseListValue(multiRaw));
+  const single = singleRaw == null ? [] : dedupeStrings(parseListValue(singleRaw));
+  return dedupeStrings([...multi, ...single]);
+}
+
 function resolveUserPath(value) {
   if (!value || typeof value !== "string") return value;
   if (value === "~") return homedir();
@@ -297,7 +333,22 @@ export async function loadConfig({ requireGrok = false } = {}) {
       DEFAULT_RESPONSES_OPENROUTER_ENGINE
     ),
     tavilyApiUrl: envOrFile("TAVILY_API_URL", fileConfig, ["TAVILY_API_URL", "tavilyApiUrl", "tavily_api_url"], DEFAULT_TAVILY_API_URL),
-    tavilyApiKey: envOrFile("TAVILY_API_KEY", fileConfig, ["TAVILY_API_KEY", "tavilyApiKey", "tavily_api_key"]),
+    // Third-party Tavily-compatible base. Never put this URL in tavilyApiUrl: proxy tokens
+    // and official tvly-* keys are not interchangeable.
+    tavilyProxyUrl: envOrFile("TAVILY_PROXY_URL", fileConfig, ["TAVILY_PROXY_URL", "tavilyProxyUrl", "tavily_proxy_url"]),
+    tavilyProxyKey: envOrFile("TAVILY_PROXY_KEY", fileConfig, ["TAVILY_PROXY_KEY", "tavilyProxyKey", "tavily_proxy_key"]),
+    tavilyProxyTimeoutMs: envOrFileInt(
+      "TAVILY_PROXY_TIMEOUT_MS",
+      fileConfig,
+      ["TAVILY_PROXY_TIMEOUT_MS", "tavilyProxyTimeoutMs", "tavily_proxy_timeout_ms"],
+      12_000,
+      { min: 1 }
+    ),
+    // Multi-key official pool. tavilyApiKey stays the first key for callers that still read one.
+    ...((tavilyApiKeys) => ({
+      tavilyApiKeys,
+      tavilyApiKey: tavilyApiKeys[0],
+    }))(resolveTavilyApiKeys(fileConfig)),
 
     firecrawlApiUrl: envOrFile(
       "FIRECRAWL_API_URL",
