@@ -80,6 +80,7 @@ try {
   assert.equal(outcome.tavily_key_index, 1);
   assert.deepEqual(seen, [0, 1], "failover from key0 to key1");
   assert.equal(outcome.tavily_keys_tried, 2);
+  assert.equal(loadTavilyRoundRobinIndex(3, cfg), 2, "cursor must move past every key this call used");
 
   rmSync(rrPath, { force: true });
   const seen2 = [];

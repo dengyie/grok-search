@@ -185,10 +185,13 @@ export async function withTavilyApiKey(config, fn) {
   const claimed = nextTavilyApiKey(config);
   const start = claimed?.index ?? 0;
   const officialUrl = tavilyOfficialApiUrl(config);
+  let lastUsed = start;
+  const remember = () => saveTavilyRoundRobinIndex(lastUsed + 1, config);
 
   for (let offset = 0; offset < keys.length; offset += 1) {
     const index = (start + offset) % keys.length;
     const apiKey = keys[index];
+    lastUsed = index;
     tried += 1;
     try {
       const result = await fn(apiKey, index, keys.length, {
@@ -196,6 +199,7 @@ export async function withTavilyApiKey(config, fn) {
         backend: "official",
       });
       if (result?.ok) {
+        remember();
         return { ...result, ...tavilyTargetMeta("official", index, keys.length, tried, proxyMeta()) };
       }
       const softError = {
@@ -207,6 +211,7 @@ export async function withTavilyApiKey(config, fn) {
         debugLog(config, `tavily key#${index} soft-fail, try next: ${lastError}`);
         continue;
       }
+      remember();
       return { ...result, ...tavilyTargetMeta("official", index, keys.length, tried, proxyMeta()) };
     } catch (error) {
       lastError = error?.message || String(error);
@@ -214,10 +219,12 @@ export async function withTavilyApiKey(config, fn) {
         debugLog(config, `tavily key#${index} exhausted/auth, try next: ${lastError}`);
         continue;
       }
+      remember();
       return { ok: false, error: lastError, ...tavilyTargetMeta("official", index, keys.length, tried, proxyMeta()) };
     }
   }
 
+  remember();
   return {
     ok: false,
     error: lastError,

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -1057,7 +1058,19 @@ function errorRunRecord(config, args, output) {
   };
 }
 
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+function entryHref(argvPath) {
+  const resolved = path.resolve(argvPath);
+  try {
+    return pathToFileURL(realpathSync(resolved)).href;
+  } catch {
+    return pathToFileURL(resolved).href;
+  }
+}
+
+// Node resolves import.meta.url through the real path. argv[1] stays as invoked, so a
+// symlink such as ~/.agents/skills/grok-search must be resolved before the comparison or
+// the CLI exits 0 without running.
+const isMain = Boolean(process.argv[1]) && import.meta.url === entryHref(process.argv[1]);
 
 if (isMain) {
 let stage = "argument";

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -42,6 +42,13 @@ async function runNode(args, env = {}) {
     return { code: error.code, stdout: error.stdout || "", stderr: error.stderr || "" };
   }
 }
+
+const linkDir = await mkdtemp(path.join(tmpdir(), "grok-search-symlink-"));
+const searchLink = path.join(linkDir, "search.js");
+await symlink(path.resolve("scripts/search.js"), searchLink);
+const linkedHelp = await runNode([searchLink, "--help"]);
+assert.equal(linkedHelp.code, 0, linkedHelp.stderr);
+assert.match(linkedHelp.stdout, /^Usage:/, "a symlinked search.js must still print help");
 
 function parseJson(stdout) {
   return JSON.parse(stdout);
