@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveTavilyApiKeys } from "../scripts/lib/config.js";
+import { extraAllocation } from "../scripts/search.js";
 import {
   hasTavilyApiKey,
   isTavilyKeyExhaustedError,
@@ -43,8 +44,10 @@ assert.equal(isTavilyKeyExhaustedError({ status: 401, message: "HTTP 401: no" })
 assert.equal(isTavilyKeyExhaustedError({ status: 402, message: "payment required" }), true);
 assert.equal(isTavilyKeyExhaustedError({ status: 403, message: "HTTP 403: forbidden by WAF" }), false);
 assert.equal(isTavilyKeyExhaustedError({ status: 403, message: "HTTP 403: invalid api key" }), true);
-assert.equal(isTavilyKeyExhaustedError({ status: 429, message: "rate limit please slow down" }), true);
+assert.equal(isTavilyKeyExhaustedError({ status: 429, message: "rate limit please slow down" }), false);
+assert.equal(isTavilyKeyExhaustedError({ status: 429, message: "HTTP 429: quota exceeded" }), true);
 assert.equal(isTavilyKeyExhaustedError({ status: 429, message: "too many requests" }), false);
+assert.equal(isTavilyKeyExhaustedError({ message: "Tavily Extract 返回空内容" }), false);
 assert.equal(isTavilyKeyExhaustedError({ message: "HTTP 402: credits exhausted" }), true);
 assert.equal(isTavilyKeyExhaustedError({ message: "empty body" }), false);
 
@@ -87,7 +90,13 @@ try {
   assert.equal(fail.ok, false);
   assert.deepEqual(seen2, [0], "non-quota errors must not scan all keys");
 
-  assert.equal(hasTavilyApiKey({ tavilyProxyUrl: "https://tavily.example/api/tavily", tavilyProxyKey: "th-proxy" }), true);
+  assert.equal(
+  extraAllocation(6, { tavilyProxyUrl: "https://tavily.example/api/tavily", tavilyProxyKey: "th-proxy" }).tavily > 0,
+  true,
+  "proxy credentials alone must count as a Tavily source"
+);
+assert.equal(extraAllocation(6, {}).tavily, 0);
+assert.equal(hasTavilyApiKey({ tavilyProxyUrl: "https://tavily.example/api/tavily", tavilyProxyKey: "th-proxy" }), true);
   assert.equal(hasTavilyApiKey({ tavilyProxyUrl: "https://tavily.example/api/tavily" }), false);
 
   const proxyRr = path.join(dir, "proxy-rr.json");
@@ -139,6 +148,30 @@ try {
   assert.equal(softFail.tavily_backend, "official");
   assert.deepEqual(softSeen, ["proxy", "official"]);
   assert.match(String(softFail.tavily_proxy_error), /空结果/);
+
+  rmSync(path.join(dir, "rate-rr.json"), { force: true });
+  const rateSeen = [];
+  const rateLimited = await withTavilyApiKey(
+    { ...cfg, tavilyRoundRobinPath: path.join(dir, "rate-rr.json") },
+    async (_apiKey, index) => {
+      rateSeen.push(index);
+      return { ok: false, error: "HTTP 429: rate limit please slow down" };
+    }
+  );
+  assert.equal(rateLimited.ok, false);
+  assert.deepEqual(rateSeen, [0], "a transient 429 must not scan the key pool");
+
+  rmSync(path.join(dir, "empty-extract-rr.json"), { force: true });
+  const emptyExtractSeen = [];
+  const emptyExtract = await withTavilyApiKey(
+    { ...cfg, tavilyRoundRobinPath: path.join(dir, "empty-extract-rr.json") },
+    async (_apiKey, index) => {
+      emptyExtractSeen.push(index);
+      return { ok: false, error: "Tavily Extract 返回空内容" };
+    }
+  );
+  assert.equal(emptyExtract.ok, false);
+  assert.deepEqual(emptyExtractSeen, [0], "empty extract content must not scan the key pool");
 
   const proxyOnly = await withTavilyApiKey(
     { tavilyProxyUrl: "https://proxy.example/api", tavilyProxyKey: "th-only", tavilyApiKeys: [] },

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   ConfigError,
   X_HANDLE_LIMIT,
@@ -14,7 +16,7 @@ import { searchGrokResponses } from "./lib/grok-responses.js";
 import { cleanupOutputDir, previewText, printJson, runRecordBase, writeRunRecord, writeRunRecordSync } from "./lib/output.js";
 import { SEARCH_BUDGET_TOTAL, SEARCH_BUDGET_X } from "./lib/prompts.js";
 import { firecrawlAuthMode, firecrawlSearch } from "./lib/firecrawl.js";
-import { tavilySearch } from "./lib/tavily.js";
+import { hasTavilyApiKey, tavilySearch } from "./lib/tavily.js";
 import { assertProxyUsable, getProxyState } from "./lib/proxy.js";
 import { buildRawSourcesPayload, compactSources, isOffDomainExtra, mergeSources, selectSources } from "./lib/sources.js";
 
@@ -390,9 +392,9 @@ function providerAttempt(result) {
   };
 }
 
-function extraAllocation(limit, config, { firecrawlAvailable = true } = {}) {
+export function extraAllocation(limit, config, { firecrawlAvailable = true } = {}) {
   if (limit <= 0) return { tavily: 0, firecrawl: 0 };
-  const tavilyAvailable = Boolean(config.tavilyApiKey) || (Array.isArray(config.tavilyApiKeys) && config.tavilyApiKeys.length > 0) || Boolean(config.tavilyProxyKey && config.tavilyProxyUrl);
+  const tavilyAvailable = hasTavilyApiKey(config);
   if (!tavilyAvailable) return { tavily: 0, firecrawl: firecrawlAvailable ? limit : 0 };
   if (!firecrawlAvailable) return { tavily: limit, firecrawl: 0 };
   const tavily = Math.ceil(limit / 2);
@@ -1055,6 +1057,9 @@ function errorRunRecord(config, args, output) {
   };
 }
 
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+
+if (isMain) {
 let stage = "argument";
 let args = null;
 let config = null;
@@ -1094,4 +1099,5 @@ try {
   printJson(output);
   console.error(error.message);
   process.exitCode = stage === "argument" ? 2 : 1;
+}
 }

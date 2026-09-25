@@ -108,8 +108,10 @@ export function isTavilyKeyExhaustedError(error) {
   const msg = String(error?.message || error || "");
   const status = error?.status ?? parseHttpStatusFromMessage(msg);
   if (status === 401 || status === 402) return true;
-  if (status === 403) return /invalid.?api.?key|unauthorized|forbidden.*(?:api.?key|token)|api.?key/i.test(msg);
-  if (status === 429) return /quota|credit|balance|billing|limit|额度|余额|计费/i.test(msg);
+  if (status === 403) return QUOTA_OR_KEY_MESSAGE.test(msg);
+  // 429 is a key failure only when the body says the quota is gone. A bare rate limit
+  // is transient: rotating the pool would spend every remaining key on the same request.
+  if (status === 429) return /quota|credit|balance|billing|额度|余额|计费/i.test(msg);
   return QUOTA_OR_KEY_MESSAGE.test(msg);
 }
 
@@ -168,11 +170,11 @@ export async function withTavilyApiKey(config, fn) {
       }
       lastError = String(result?.error || lastError);
       proxyError = redactSecrets(lastError, config);
-      debugLog(config, `tavily proxy failed, fall back to official: ${lastError}`);
+      debugLog(config, `tavily proxy failed, fall back to official: ${proxyError}`);
     } catch (error) {
       lastError = error?.message || String(error);
       proxyError = redactSecrets(lastError, config);
-      debugLog(config, `tavily proxy error, fall back to official: ${lastError}`);
+      debugLog(config, `tavily proxy error, fall back to official: ${proxyError}`);
     }
   }
 
@@ -294,8 +296,12 @@ export async function tavilySearch(query, limit, config, filters = {}) {
       },
       ...tavilyRequestOptions(config, target, TAVILY_SEARCH_TIMEOUT_MS),
     });
-    const sources = (Array.isArray(data?.results) ? data.results : []).map((result) => sourceFromTavily(result)).filter(Boolean);
-    if (!sources.length && target?.backend === "proxy") {
+    const rawResults = Array.isArray(data?.results) ? data.results : [];
+    const sources = rawResults.map((result) => sourceFromTavily(result)).filter(Boolean);
+    // Fall back only when the proxy returned no result objects. Rows that exist but have no
+    // usable URL are still a proxy answer; dropping them and calling official would discard
+    // the payload and spend another key.
+    if (!rawResults.length && target?.backend === "proxy") {
       return { ok: false, provider: "tavily", error: "Tavily proxy 返回空结果", sources, raw: data };
     }
     return { ok: true, provider: "tavily", sources, raw: data };

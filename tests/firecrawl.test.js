@@ -334,7 +334,12 @@ await withServer(
     const filters = { allowedDomains: ["github.com"], excludedDomains: [] };
     const firecrawl = await firecrawlSearch("query", 2, { ...baseConfig, firecrawlApiUrl: base }, filters);
     assert.equal(firecrawl.ok, true);
-    const tavily = await tavilySearch("query", 2, { ...baseConfig, tavilyApiKey: "key", tavilyApiUrl: `${base}/tavily` }, filters);
+    const tavily = await tavilySearch(
+      "query",
+      2,
+      { ...baseConfig, tavilyApiKey: "key", tavilyApiUrl: `${base}/tavily`, tavilyRoundRobinPath: path.join(stateDir, "tavily-rr.json") },
+      filters
+    );
     assert.equal(tavily.ok, true);
     const excluded = await firecrawlSearch(
       "query",

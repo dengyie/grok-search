@@ -75,6 +75,31 @@ try {
   assert.match(String(emptyOutcome.tavily_proxy_error), /空结果/);
   assert.equal(emptyOutcome.sources?.[0]?.url, "https://example.com/official");
 
+  let officialHits = 0;
+  const countingOfficial = await listen((req, res) => {
+    officialHits += 1;
+    req.resume();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ results: [{ url: "https://example.com/should-not-run", title: "No", content: "no" }] }));
+  });
+  const blankUrl = await listen((req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ results: [{ title: "No URL", content: "body still useful" }] }));
+  });
+  const blankOutcome = await tavilySearch("blank url", 3, {
+    ...baseConfig,
+    tavilyApiUrl: `http://127.0.0.1:${countingOfficial.address().port}`,
+    tavilyProxyUrl: `http://127.0.0.1:${blankUrl.address().port}`,
+    tavilyProxyKey: "th-proxy",
+    tavilyRoundRobinPath: path.join(dir, "blank-rr.json"),
+  });
+  assert.equal(blankOutcome.ok, true, `results without URLs stay on the proxy: ${blankOutcome.error}`);
+  assert.equal(blankOutcome.tavily_backend, "proxy");
+  assert.equal(officialHits, 0, "a non-empty proxy payload must not call official");
+  countingOfficial.close();
+  blankUrl.close();
+
   const officialEmpty = await tavilySearch("empty query", 3, {
     ...baseConfig,
     tavilyApiUrl: `http://127.0.0.1:${empty.address().port}`,
