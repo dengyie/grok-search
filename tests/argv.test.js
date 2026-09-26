@@ -232,6 +232,7 @@ await withServer(
     assert.equal(Object.hasOwn(output.diagnostics.options, "search_mode"), false);
     assert.equal(output.diagnostics.options.extra_mode, "off");
     assert.deepEqual(output.diagnostics.provider_attempts, [{ provider: "grok-responses:xai", ok: true, count: 1 }]);
+    assert.equal(output.diagnostics.responses_native_search, true);
     assert.equal(output.diagnostics.cost_usd, 0.000015);
     assert.equal(output.sources.items.length, 1);
     assert.equal(output.sources.total, 1);
@@ -254,6 +255,30 @@ await withServer(
     });
     assert.equal(Object.hasOwn(output.diagnostics.options, "instructions_chars"), false);
     assert.equal(typeof output.diagnostics.duration_ms, "number");
+  }
+);
+
+// A relay that accepts the request but drops tools still returns prose. That is not a search.
+await withServer(
+  (req, res) => {
+    assert.equal(req.url, "/responses");
+    readJson(req, () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          output: [{ type: "message", content: [{ type: "output_text", text: "Answer from memory." }] }],
+          usage: { server_side_tool_usage_details: { web_search_calls: 0, x_search_calls: 0 } },
+        })
+      );
+    });
+  },
+  async (_server, port) => {
+    const searchResult = await runNode(["scripts/search.js", "--no-extra", "mock query"], baseGrokEnv(port));
+    assert.equal(searchResult.code, 1, searchResult.stdout);
+    const output = parseJson(searchResult.stdout);
+    assert.equal(output.error.code, "GROK_RESPONSES_NO_SEARCH");
+    assert.equal(output.diagnostics.responses_native_search, false);
+    assert.equal(output.diagnostics.responses_web_search_calls, 0);
   }
 );
 

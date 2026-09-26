@@ -503,6 +503,9 @@ export function parseGrokResponses(data, { defaultTool = "web_search", xEnabled 
     webSearchCalls: Math.max(usageCounts?.webSearchCalls ?? 0, searched.webSearchCalls),
     xSearchCalls: Math.max(usageCounts?.xSearchCalls ?? 0, searched.xSearchCalls),
   };
+  // A text-only reply is not a search. Relays that drop tools still return an answer from
+  // memory, with neither a tool trace nor a citation.
+  const nativeSearch = counts.webSearchCalls + counts.xSearchCalls > 0 || sources.length > 0;
 
   return {
     text,
@@ -510,6 +513,7 @@ export function parseGrokResponses(data, { defaultTool = "web_search", xEnabled 
     diagnostics: {
       ...usageDiagnostics(data),
       ...(servedModel ? { responses_model: servedModel } : {}),
+      responses_native_search: nativeSearch,
       responses_web_search_calls: counts.webSearchCalls,
       responses_x_search_calls: counts.xSearchCalls,
       responses_tool_calls: searched.toolCalls,
@@ -544,6 +548,12 @@ export async function searchGrokResponses(query, options, config) {
   if (!parsed.text.trim()) {
     const error = new Error("Grok Responses 返回空内容");
     error.code = "GROK_RESPONSES_EMPTY";
+    error.diagnostics = parsed.diagnostics;
+    throw error;
+  }
+  if (!parsed.diagnostics.responses_native_search) {
+    const error = new Error("Grok Responses 未执行服务端搜索，返回的是无来源正文");
+    error.code = "GROK_RESPONSES_NO_SEARCH";
     error.diagnostics = parsed.diagnostics;
     throw error;
   }

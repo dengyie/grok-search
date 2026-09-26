@@ -527,4 +527,21 @@ assert.equal(missing.text, "");
 assert.equal(missing.sources.length, 0);
 assert.equal(missing.diagnostics.warnings.length >= 1, true);
 
+const memoryOnly = parseGrokResponses({
+  output: [{ type: "message", content: [{ type: "output_text", text: "I remember this without searching." }] }],
+  usage: { server_side_tool_usage_details: { web_search_calls: 0, x_search_calls: 0 } },
+});
+assert.equal(memoryOnly.text, "I remember this without searching.");
+assert.equal(memoryOnly.sources.length, 0);
+assert.equal(memoryOnly.diagnostics.responses_web_search_calls, 0);
+assert.equal(memoryOnly.diagnostics.responses_native_search, false);
+
+const searchedWeb = parseGrokResponses({
+  output: [
+    { type: "web_search_call", status: "completed", action: { type: "search", query: "a" } },
+    { type: "message", content: [{ type: "output_text", text: "Searched answer." }] },
+  ],
+});
+assert.equal(searchedWeb.diagnostics.responses_native_search, true);
+
 console.log("responses fixtures ok");

@@ -853,6 +853,10 @@ function failureDiagnostics(config, searchOptions, extraOptions, extra, error, {
     grok_endpoint: "responses",
     ...(labels ? { grok_error: { code: labels.code, message: error.message } } : {}),
     warnings: [warning, ...(extra?.warnings || []), ...(error?.diagnostics?.warnings || [])],
+    ...(error?.diagnostics?.responses_native_search === false ? { responses_native_search: false } : {}),
+    ...(Number.isFinite(error?.diagnostics?.responses_web_search_calls)
+      ? { responses_web_search_calls: error.diagnostics.responses_web_search_calls }
+      : {}),
     provider_attempts: [grokFailureAttempt(config, error), ...(extra?.provider_attempts || [])],
     options: {
       api_provider: config.apiProvider,
