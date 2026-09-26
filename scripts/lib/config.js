@@ -10,7 +10,7 @@ export class ConfigError extends Error {
   }
 }
 
-const DEFAULT_MODEL = "grok-4.3";
+const DEFAULT_MODEL = "grok-4.20-multi-agent-0309";
 const DEFAULT_EXTRA = 6;
 export const DEFAULT_SOURCE_CHARS = 400;
 export const DEFAULT_MAX_SOURCES = 12;

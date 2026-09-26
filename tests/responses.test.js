@@ -114,6 +114,11 @@ const multiAgentBody = buildResponsesBody(
   { apiProvider: "xai" }
 );
 assert.equal(multiAgentBody.reasoning.effort, "low");
+assert.deepEqual(
+  multiAgentBody.tools.map((tool) => tool.type),
+  ["web_search"],
+  "multi-agent default search must request server-side web_search"
+);
 
 const openRouterBody = buildResponsesBody(
   "latest docs",

@@ -58,7 +58,7 @@ Environment:
   GROK_API_URL         Responses-compatible base URL; required
   GROK_API_KEY         API key for GROK_API_URL; required
   GROK_API_PROVIDER    Optional provider: xai, openrouter, or openai-compatible
-  GROK_MODEL           Optional default model; default grok-4.3
+  GROK_MODEL           Optional default model; default grok-4.20-multi-agent-0309
   GROK_SEARCH_SOURCE   Optional default search source: web, x, or both; default web
   GROK_RESPONSES_MAX_TURNS
                        Optional Responses max_turns; default 3

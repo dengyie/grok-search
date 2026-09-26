@@ -18,7 +18,7 @@
 
 默认 Responses 参数：
 
-- model：`grok-4.3`
+- model：`grok-4.20-multi-agent-0309`
 - `max_turns=3`
 - `reasoning.effort=low`
 - xAI/openai-compatible：按 `--source` 挂 `web_search` / `x_search`，默认只挂 `web_search`
@@ -112,7 +112,7 @@ Direct Map 只检查 `/sitemap.xml` 和首页同域链接。
 | `GROK_API_URL` | 支持 `/responses` 的 base URL |
 | `GROK_API_KEY` | 对应 endpoint 的 API key |
 | `GROK_API_PROVIDER` | `xai`、`openrouter` 或 `openai-compatible` |
-| `GROK_MODEL` | 默认 `grok-4.3` |
+| `GROK_MODEL` | 默认 `grok-4.20-multi-agent-0309` |
 | `GROK_RESPONSES_MAX_TURNS` | 默认 `3` |
 | `GROK_RESPONSES_REASONING_EFFORT` | 默认 `low` |
 | `GROK_RESPONSES_PARALLEL_TOOL_CALLS` | `true` / `false`，默认不发；`false` 在透传的中转上把 X 搜索压到每 turn 一次 |

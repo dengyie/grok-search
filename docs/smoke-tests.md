@@ -47,7 +47,7 @@ rm -f ~/.cache/grok-search/firecrawl-cooldown.json
 export GROK_API_PROVIDER="xai"
 export GROK_API_URL="https://api.x.ai/v1"
 export GROK_API_KEY="your-key"
-export GROK_MODEL="grok-4.3"
+export GROK_MODEL="grok-4.20-multi-agent-0309"
 
 ./scripts/search.js "latest xAI docs"
 ./scripts/search.js --no-extra "only Grok Responses"

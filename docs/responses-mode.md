@@ -20,7 +20,7 @@
 
 ```json
 {
-  "model": "grok-4.3",
+  "model": "grok-4.20-multi-agent-0309",
   "input": [
     { "role": "system", "content": "..." },
     { "role": "user", "content": "..." }
